@@ -26,6 +26,7 @@ from pynicotine.gtkgui.buddies import Buddies
 from pynicotine.gtkgui.chatrooms import ChatRooms
 from pynicotine.gtkgui.downloads import Downloads
 from pynicotine.gtkgui.interests import Interests
+from pynicotine.gtkgui.musicplayer import MusicPlayerPanel
 from pynicotine.gtkgui.privatechat import PrivateChats
 from pynicotine.gtkgui.search import Searches
 from pynicotine.gtkgui.uploads import Uploads
@@ -109,6 +110,8 @@ class MainWindow(Window):
             self.log_container,
             self.log_search_bar,
             self.log_view_container,
+            self.music_paned,
+            self.music_player_container,
             self.private_content,
             self.private_end,
             self.private_entry,
@@ -179,6 +182,10 @@ class MainWindow(Window):
 
             self.header_bar.set_show_title_buttons(True)
 
+            self.music_paned.set_resize_start_child(False)
+            self.music_paned.set_shrink_start_child(False)
+            self.music_paned.set_resize_end_child(True)
+
             self.horizontal_paned.set_resize_start_child(True)
             self.horizontal_paned.set_shrink_start_child(False)
             self.horizontal_paned.set_resize_end_child(False)
@@ -201,6 +208,10 @@ class MainWindow(Window):
         else:
             self.header_bar.set_has_subtitle(False)
             self.header_bar.set_show_close_button(True)
+
+            self.music_paned.child_set_property(self.music_player_container, "resize", False)
+            self.music_paned.child_set_property(self.music_player_container, "shrink", False)
+            self.music_paned.child_set_property(self.horizontal_paned, "resize", True)
 
             self.horizontal_paned.child_set_property(self.vertical_paned, "resize", True)
             self.horizontal_paned.child_set_property(self.vertical_paned, "shrink", False)
@@ -249,6 +260,21 @@ class MainWindow(Window):
             switch_page_callback=self.on_switch_page,
             reorder_page_callback=self.on_page_reordered
         )
+
+        # Music player sidebar
+        self.music_player = MusicPlayerPanel(self)
+
+        # Music player toggle button in header bar
+        self.music_player_button = Gtk.Button()
+        self.music_player_button.set_icon_name("media-playback-start-symbolic")
+        self.music_player_button.set_tooltip_text(_("Music Player (F8)"))
+        self.music_player_button.connect("clicked", self.on_toggle_music_player)
+
+        if GTK_API_VERSION >= 4:
+            self.header_end.prepend(self.music_player_button)
+        else:
+            self.header_end.pack_start(self.music_player_button, False, False, 0)
+            self.music_player_button.show()
 
         # Secondary notebooks
         self.interests = Interests(self)
@@ -521,6 +547,10 @@ class MainWindow(Window):
         state = GLib.Variant.new_boolean(not config.sections["logging"]["logcollapsed"])
         action = Gio.SimpleAction(name="show-log-pane", state=state)
         action.connect("change-state", self.on_show_log_pane)
+        self.add_action(action)
+
+        action = Gio.SimpleAction(name="toggle-music-player")
+        action.connect("activate", self.on_toggle_music_player)
         self.add_action(action)
 
         # Search
@@ -1196,6 +1226,9 @@ class MainWindow(Window):
             self.log_view.scroll_bottom()
 
         config.sections["logging"]["logcollapsed"] = not visible
+
+    def on_toggle_music_player(self, *_args):
+        self.music_player.toggle_visible()
 
     # Status Bar #
 

@@ -305,7 +305,8 @@ class Config:
                 "upload": {},
                 "user_browse": {},
                 "buddy_list": {},
-                "chat_room": {}
+                "chat_room": {},
+                "music_player_files": {}
             },
             "searches": {
                 "expand_results": "all",

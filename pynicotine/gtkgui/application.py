@@ -238,6 +238,7 @@ class Application:
             ("win.context-menu", ["<Shift>F10"]),
             ("win.focus-top-bar", ["<Primary>l"]),
             ("win.change-focus-view", ["F6"]),
+            ("win.toggle-music-player", ["F8"]),
             ("win.show-log-pane", ["F9"]),
             ("win.reopen-closed-tab", ["<Primary><Shift>t"]),
             ("win.close-tab", ["<Primary>w", "<Primary>F4"]),
@@ -402,6 +403,8 @@ class Application:
             ("#" + _("_Rescan Shares"), "app.rescan-shares"),
             (">" + _("_Browse Shares"), self._create_browse_shares_menu()),
             ("#" + _("Configure _Shares"), "app.configure-shares"),
+            ("", None),
+            ("#" + _("_Music Player (F8)"), "win.toggle-music-player"),
             ("", None),
             (">" + _("_Help"), self._create_help_menu())
         )

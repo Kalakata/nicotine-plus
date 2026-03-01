@@ -1483,11 +1483,21 @@
     <property name="visible">True</property>
     <property name="width-request">580</property>
     <child>
-      <object class="GtkPaned" id="horizontal_paned">
+      <object class="GtkPaned" id="music_paned">
         <property name="vexpand">True</property>
         <property name="visible">True</property>
         <child>
-          <object class="GtkPaned" id="vertical_paned">
+          <object class="GtkBox" id="music_player_container">
+            <property name="visible">False</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkPaned" id="horizontal_paned">
+            <property name="hexpand">True</property>
+            <property name="vexpand">True</property>
+            <property name="visible">True</property>
+            <child>
+              <object class="GtkPaned" id="vertical_paned">
             <property name="orientation">vertical</property>
             <property name="visible">True</property>
             <child>
@@ -1529,6 +1539,8 @@
           <object class="GtkBox" id="buddy_list_container">
             <property name="visible">False</property>
           </object>
+        </child>
+      </object>
         </child>
       </object>
     </child>

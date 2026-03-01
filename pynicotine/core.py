@@ -18,9 +18,10 @@ class Core:
 
     __slots__ = ("shares", "users", "network_filter", "statistics", "search", "downloads",
                  "uploads", "interests", "userbrowse", "userinfo", "buddies", "privatechat",
-                 "chatrooms", "pluginhandler", "now_playing", "portmapper", "notifications",
-                 "port_checker", "update_checker", "_network_thread", "cli_interface_address",
-                 "cli_listen_port", "cli_rescanning", "enabled_components")
+                 "chatrooms", "pluginhandler", "now_playing", "musicplayer", "portmapper",
+                 "notifications", "port_checker", "update_checker", "_network_thread",
+                 "cli_interface_address", "cli_listen_port", "cli_rescanning",
+                 "enabled_components")
 
     def __init__(self):
 
@@ -39,6 +40,7 @@ class Core:
         self.chatrooms = None
         self.pluginhandler = None
         self.now_playing = None
+        self.musicplayer = None
         self.portmapper = None
         self.notifications = None
         self.port_checker = None
@@ -57,9 +59,9 @@ class Core:
         if enabled_components is None:
             enabled_components = {
                 "error_handler", "signal_handler", "cli", "portmapper", "network_thread", "shares", "users",
-                "notifications", "network_filter", "now_playing", "statistics", "port_checker", "update_checker",
-                "search", "downloads", "uploads", "interests", "userbrowse", "userinfo", "buddies",
-                "chatrooms", "privatechat", "pluginhandler"
+                "notifications", "network_filter", "now_playing", "musicplayer", "statistics",
+                "port_checker", "update_checker", "search", "downloads", "uploads", "interests",
+                "userbrowse", "userinfo", "buddies", "chatrooms", "privatechat", "pluginhandler"
             }
 
         self.enabled_components = enabled_components
@@ -114,6 +116,10 @@ class Core:
         if "now_playing" in enabled_components:
             from pynicotine.nowplaying import NowPlaying
             self.now_playing = NowPlaying()
+
+        if "musicplayer" in enabled_components:
+            from pynicotine.musicplayer import MusicPlayer
+            self.musicplayer = MusicPlayer()
 
         if "statistics" in enabled_components:
             from pynicotine.transfers import Statistics

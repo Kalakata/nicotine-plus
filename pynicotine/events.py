@@ -188,6 +188,12 @@ EVENT_NAMES = {
     "user-info-response",
     "user-info-show-user",
     "user-interests",
+
+    # Music player
+    "music-player-state-changed",
+    "music-player-position-updated",
+    "music-player-spectrum-data",
+    "music-player-analysis-complete",
 }
 
 
