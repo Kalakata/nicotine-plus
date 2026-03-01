@@ -64,7 +64,7 @@ def install_pypi():
 
         # Python 3.13+ removed stdlib modules needed by audioread/soundfile
         "standard-aifc",
-        "standard-audioop",
+        "audioop-lts",
         "standard-chunk",
         "standard-sunau",
     ])
