@@ -192,7 +192,6 @@ EVENT_NAMES = {
     # Music player
     "music-player-state-changed",
     "music-player-position-updated",
-    "music-player-spectrum-data",
     "music-player-analysis-complete",
     "music-player-waveform-ready",
 }

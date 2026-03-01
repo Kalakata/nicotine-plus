@@ -85,17 +85,54 @@
             <property name="margin-bottom">2</property>
           </object>
         </child>
+        <!-- Quality Score Bar -->
+        <child>
+          <object class="GtkBox" id="_quality_box">
+            <property name="margin-start">6</property>
+            <property name="margin-end">6</property>
+            <property name="margin-top">2</property>
+            <property name="spacing">6</property>
+            <property name="visible">True</property>
+            <child>
+              <object class="GtkDrawingArea" id="quality_bar">
+                <property name="height-request">12</property>
+                <property name="width-request">1</property>
+                <property name="hexpand">True</property>
+                <property name="valign">center</property>
+                <property name="visible">True</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel" id="quality_score_label">
+                <property name="label"></property>
+                <property name="visible">True</property>
+                <property name="width-chars">14</property>
+                <property name="xalign">1</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkToggleButton" id="cutoff_toggle">
+                <property name="icon-name">dialog-warning-symbolic</property>
+                <property name="tooltip-text" translatable="yes">Toggle cutoff overlay</property>
+                <property name="visible">True</property>
+                <property name="active">True</property>
+                <property name="valign">center</property>
+                <signal name="toggled" handler="on_cutoff_toggled"/>
+              </object>
+            </child>
+          </object>
+        </child>
+        <!-- Technical Detail -->
         <child>
           <object class="GtkLabel" id="verdict_label">
             <property name="label"></property>
             <property name="margin-start">6</property>
             <property name="margin-end">6</property>
-            <property name="margin-top">2</property>
             <property name="margin-bottom">2</property>
             <property name="visible">True</property>
             <property name="wrap">True</property>
             <property name="width-chars">1</property>
-            <property name="max-width-chars">40</property>
+            <property name="max-width-chars">50</property>
             <property name="xalign">0</property>
             <style>
               <class name="dim-label"/>

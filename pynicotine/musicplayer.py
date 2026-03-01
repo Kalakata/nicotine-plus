@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import os
-import struct
 import threading
 
 from pynicotine.config import config
@@ -28,9 +27,23 @@ try:
 except ImportError:
     pass
 
+LIBROSA_AVAILABLE = False
+
+try:
+    import librosa
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    pass
+
 
 # Known frequency cutoffs for common MP3 bitrates (approximate upper bound in Hz)
 BITRATE_CUTOFFS = {
+    32: 7000,
+    48: 8500,
+    64: 10000,
+    80: 11500,
+    96: 13500,
+    112: 15000,
     128: 16000,
     160: 17500,
     192: 19000,
@@ -47,23 +60,19 @@ STATE_PAUSED = "paused"
 
 class MusicPlayer:
 
-    __slots__ = ("_pipeline", "_playbin", "_spectrum_element", "_volume_element",
+    __slots__ = ("_pipeline", "_playbin", "_volume_element",
                  "_current_file", "_state", "_position_timer_id",
-                 "_analysis_pipeline", "_background_thread", "_spectrogram_data",
-                 "_sample_rate", "_volume")
+                 "_background_thread", "_sample_rate", "_volume")
 
     def __init__(self):
 
         self._pipeline = None
         self._playbin = None
-        self._spectrum_element = None
         self._volume_element = None
         self._current_file = None
         self._state = STATE_STOPPED
         self._position_timer_id = None
-        self._analysis_pipeline = None
         self._background_thread = None
-        self._spectrogram_data = []
         self._sample_rate = 44100
         self._volume = config.sections.get("players", {}).get("volume", 100) / 100.0
 
@@ -123,58 +132,29 @@ class MusicPlayer:
         volume = Gst.ElementFactory.make("volume", "volume")
         volume.set_property("volume", self._volume)
 
-        # Tee to split audio into playback + analysis
-        tee = Gst.ElementFactory.make("tee", "tee")
-
-        # Playback branch
-        queue_play = Gst.ElementFactory.make("queue", "queue_play")
+        # Output
         sink = Gst.ElementFactory.make("autoaudiosink", "sink")
 
-        # Analysis branch
-        queue_analysis = Gst.ElementFactory.make("queue", "queue_analysis")
-        audioconvert2 = Gst.ElementFactory.make("audioconvert", "convert2")
-        spectrum = Gst.ElementFactory.make("spectrum", "spectrum")
-        fakesink = Gst.ElementFactory.make("fakesink", "fakesink")
-
-        if any(elem is None for elem in (source, decoder, audioconvert, audioresample,
-                                         volume, tee, queue_play, sink, queue_analysis,
-                                         audioconvert2, spectrum, fakesink)):
+        if any(elem is None for elem in (source, decoder, audioconvert,
+                                         audioresample, volume, sink)):
             log.add("Music player: failed to create GStreamer elements. "
                      "Check that gstreamer plugins are installed.")
             self._pipeline = None
             return
 
-        # Configure spectrum element
-        spectrum.set_property("bands", 512)
-        spectrum.set_property("interval", 100000000)  # 100ms
-        spectrum.set_property("threshold", -80)
-        spectrum.set_property("post-messages", True)
-        spectrum.set_property("message-magnitude", True)
-        self._spectrum_element = spectrum
         self._volume_element = volume
 
         # Add elements to pipeline
-        for elem in (source, decoder, audioconvert, audioresample, volume, tee,
-                     queue_play, sink, queue_analysis, audioconvert2, spectrum, fakesink):
+        for elem in (source, decoder, audioconvert, audioresample, volume, sink):
             self._pipeline.add(elem)
 
         # Link source -> decoder (decoder pads are dynamic)
         source.link(decoder)
 
-        # Link playback branch: convert -> resample -> volume -> tee
+        # Link: audioconvert -> audioresample -> volume -> sink
         audioconvert.link(audioresample)
         audioresample.link(volume)
-        volume.link(tee)
-
-        # Link tee -> playback queue -> sink
-        tee.link(queue_play)
-        queue_play.link(sink)
-
-        # Link tee -> analysis queue -> convert2 -> spectrum -> fakesink
-        tee.link(queue_analysis)
-        queue_analysis.link(audioconvert2)
-        audioconvert2.link(spectrum)
-        spectrum.link(fakesink)
+        volume.link(sink)
 
         # Handle dynamic pad from decodebin
         decoder.connect("pad-added", self._on_decoder_pad_added, audioconvert)
@@ -216,24 +196,8 @@ class MusicPlayer:
 
         elif msg_type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            log.add("Music player error: %s (%s)", err.message, debug)
+            log.add("Music player error: %s", f"{err.message} ({debug})")
             self.stop()
-
-        elif msg_type == Gst.MessageType.ELEMENT:
-            structure = message.get_structure()
-            if structure and structure.get_name() == "spectrum":
-                self._handle_spectrum_message(structure)
-
-    def _handle_spectrum_message(self, structure):
-
-        magnitudes = structure.get_value("magnitude")
-        if magnitudes is None:
-            return
-
-        # Convert GValueArray to list
-        mag_list = [magnitudes[i] for i in range(len(magnitudes))]
-
-        events.emit_main_thread("music-player-spectrum-data", mag_list)
 
     def pause(self):
 
@@ -292,7 +256,6 @@ class MusicPlayer:
             self._pipeline.set_state(Gst.State.NULL)
             self._pipeline = None
 
-        self._spectrum_element = None
         self._volume_element = None
 
         if self._state != STATE_STOPPED:
@@ -358,13 +321,31 @@ class MusicPlayer:
         current, duration = self.get_position()
         events.emit("music-player-position-updated", current, duration)
 
+    # Audio Decoding #
+
+    @staticmethod
+    def _decode_audio(file_path):
+        """Decode audio file to mono numpy array at native sample rate.
+
+        Uses librosa.load() which handles MP3, FLAC, WAV, OGG via
+        soundfile + audioread backends.
+        Returns (samples, sample_rate) or (None, None) on failure.
+        """
+
+        try:
+            samples, sample_rate = librosa.load(file_path, sr=None, mono=True)
+            return samples, sample_rate
+        except Exception as e:
+            log.add("Music player: failed to decode audio: %s", str(e))
+            return None, None
+
     # Spectrogram Analysis #
 
     def analyze_and_generate_waveform(self, file_path, num_bars=150):
-        """Run waveform generation then spectral analysis sequentially in one thread."""
+        """Run waveform generation then spectral analysis in a background thread."""
 
-        if not GSTREAMER_AVAILABLE:
-            log.add("GStreamer not available, cannot analyze audio")
+        if not LIBROSA_AVAILABLE:
+            log.add("librosa not available, cannot analyze audio")
             return
 
         if not os.path.isfile(file_path):
@@ -380,84 +361,72 @@ class MusicPlayer:
         self._background_thread.start()
 
     def _run_background_tasks(self, file_path, num_bars):
-        """Run waveform first, then analysis — sequentially to avoid GStreamer crashes."""
+        """Decode audio once, then generate waveform and spectrogram from numpy arrays."""
 
-        self._run_waveform(file_path, num_bars)
-        if NUMPY_AVAILABLE:
-            self._run_analysis(file_path)
-
-    def _run_analysis(self, file_path):
-
-        spectrogram_frames = []
-        sample_rate = 44100
-        analysis_done = threading.Event()
-
-        pipeline = Gst.Pipeline.new("analysis")
-
-        source = Gst.ElementFactory.make("filesrc", "src")
-        source.set_property("location", file_path)
-
-        decoder = Gst.ElementFactory.make("decodebin", "dec")
-        audioconvert = Gst.ElementFactory.make("audioconvert", "conv")
-
-        spectrum = Gst.ElementFactory.make("spectrum", "spectrum")
-        spectrum.set_property("bands", 512)
-        spectrum.set_property("interval", 50000000)  # 50ms for finer time resolution
-        spectrum.set_property("threshold", -80)
-        spectrum.set_property("post-messages", True)
-        spectrum.set_property("message-magnitude", True)
-
-        fakesink = Gst.ElementFactory.make("fakesink", "sink")
-
-        for elem in (source, decoder, audioconvert, spectrum, fakesink):
-            pipeline.add(elem)
-
-        source.link(decoder)
-        audioconvert.link(spectrum)
-        spectrum.link(fakesink)
-
-        def on_pad_added(_dec, pad, conv):
-            caps = pad.get_current_caps() or pad.query_caps(None)
-            struct_obj = caps.get_structure(0)
-            if struct_obj and struct_obj.get_name().startswith("audio/"):
-                nonlocal sample_rate
-                success, rate = struct_obj.get_int("rate")
-                if success:
-                    sample_rate = rate
-                sink_pad = conv.get_static_pad("sink")
-                if not sink_pad.is_linked():
-                    pad.link(sink_pad)
-
-        decoder.connect("pad-added", on_pad_added, audioconvert)
-
-        bus = pipeline.get_bus()
-        bus.add_signal_watch()
-
-        def on_message(_bus, message):
-            if message.type == Gst.MessageType.EOS:
-                analysis_done.set()
-            elif message.type == Gst.MessageType.ERROR:
-                err, debug = message.parse_error()
-                log.add("Music player analysis error: %s (%s)", err.message, debug)
-                analysis_done.set()
-            elif message.type == Gst.MessageType.ELEMENT:
-                structure = message.get_structure()
-                if structure and structure.get_name() == "spectrum":
-                    magnitudes = structure.get_value("magnitude")
-                    if magnitudes is not None:
-                        frame = [magnitudes[i] for i in range(len(magnitudes))]
-                        spectrogram_frames.append(frame)
-
-        bus.connect("message", on_message)
-
-        pipeline.set_state(Gst.State.PLAYING)
-        analysis_done.wait(timeout=300)  # 5 minute max
-        pipeline.set_state(Gst.State.NULL)
-
-        if not spectrogram_frames:
+        samples, sample_rate = self._decode_audio(file_path)
+        if samples is None:
+            log.add("Music player: failed to decode audio for analysis")
             return
 
-        spectrogram = np.array(spectrogram_frames, dtype=np.float32)
+        # Abort if file changed or playback stopped
+        if self._current_file != file_path or self._state == STATE_STOPPED:
+            return
+
+        self._generate_waveform(samples, sample_rate, file_path, num_bars)
+
+        # Abort check again before heavier spectrogram work
+        if self._current_file != file_path or self._state == STATE_STOPPED:
+            return
+
+        self._generate_spectrogram(samples, sample_rate, file_path)
+
+    def _generate_waveform(self, samples, sample_rate, file_path, num_bars):
+        """Generate waveform envelope from raw samples using numpy."""
+
+        # Low-pass focus: downsample to ~1kHz to capture bass envelope
+        target_rate = 1000
+        if sample_rate > target_rate:
+            ratio = sample_rate // target_rate
+            samples_lp = samples[::ratio]
+        else:
+            samples_lp = samples
+
+        total = len(samples_lp)
+        if total == 0:
+            return
+
+        # Take absolute values for amplitude envelope
+        abs_samples = np.abs(samples_lp)
+
+        waveform = []
+        for i in range(num_bars):
+            start = int(i * total / num_bars)
+            end = int((i + 1) * total / num_bars)
+            end = max(end, start + 1)
+            segment_max = float(np.max(abs_samples[start:end]))
+            waveform.append(segment_max)
+
+        # Normalize to 0.0-1.0
+        max_val = max(waveform) if waveform else 1.0
+        if max_val > 0:
+            waveform = [v / max_val for v in waveform]
+
+        events.emit_main_thread("music-player-waveform-ready", file_path, waveform)
+
+    def _generate_spectrogram(self, samples, sample_rate, file_path):
+        """Generate spectrogram using librosa STFT and run transcode detection."""
+
+        # Compute STFT — n_fft=4096 gives ~10Hz resolution at 44.1kHz
+        stft = librosa.stft(samples, n_fft=4096, hop_length=1024)
+        magnitude = np.abs(stft)
+
+        # Convert to dB
+        spectrogram_db = librosa.amplitude_to_db(magnitude, ref=np.max)
+
+        # librosa STFT shape is (n_fft/2+1, num_frames)
+        # GUI expects (num_frames, num_bands) — transpose
+        spectrogram = spectrogram_db.T.astype(np.float32)
+
         result = self._detect_transcode(spectrogram, sample_rate)
 
         events.emit_main_thread(
@@ -467,6 +436,9 @@ class MusicPlayer:
 
     def _detect_transcode(self, spectrogram, sample_rate):
         """Analyze spectrogram to detect frequency cutoff indicating a transcode.
+
+        Detects the frequency where the spectrum drops to the dB floor,
+        indicating a lossy codec's hard frequency cutoff.
 
         Returns dict with:
             cutoff_hz: detected frequency cutoff
@@ -481,22 +453,24 @@ class MusicPlayer:
         # Average magnitude across all time frames
         avg_spectrum = np.mean(spectrogram, axis=0)
 
-        # Find the peak magnitude in the audible range (1kHz - 10kHz)
-        low_band = int(1000 / freq_per_band)
-        high_band = int(10000 / freq_per_band)
-        peak_magnitude = np.max(avg_spectrum[low_band:high_band])
+        # Smooth the spectrum (500Hz window) to remove noise
+        smooth_size = max(3, int(500 / freq_per_band))
+        if smooth_size % 2 == 0:
+            smooth_size += 1
+        kernel = np.ones(smooth_size) / smooth_size
+        smoothed = np.convolve(avg_spectrum, kernel, mode="same")
 
-        # Walk from high frequencies downward to find cutoff
-        # Cutoff = where energy drops more than 20dB below peak consistently
-        threshold = peak_magnitude - 25  # dB below peak
-        cutoff_band = num_bands - 1
+        # The dB floor from librosa.amplitude_to_db is -80dB
+        # A lossy codec creates a hard cutoff where the spectrum drops to this floor
+        # Walk from high frequencies down, find where spectrum rises above the floor
+        db_floor = -79.0  # just above the -80dB floor
+        search_lo = int(5000 / freq_per_band)
+        search_hi = int((nyquist - 500) / freq_per_band)  # skip edge artifacts
 
-        # Use a sliding window of 5 bands for robustness
-        window_size = 5
-        for i in range(num_bands - window_size, low_band, -1):
-            window_avg = np.mean(avg_spectrum[i:i + window_size])
-            if window_avg > threshold:
-                cutoff_band = i + window_size
+        cutoff_band = search_hi
+        for i in range(search_hi, search_lo, -1):
+            if smoothed[i] > db_floor:
+                cutoff_band = i
                 break
 
         cutoff_hz = cutoff_band * freq_per_band
@@ -513,7 +487,16 @@ class MusicPlayer:
         except Exception:
             reported_bitrate = None
 
-        if cutoff_hz < 19000:
+        # Determine expected cutoff based on reported bitrate
+        # Lossless files (500+ kbps) should have content near Nyquist
+        if reported_bitrate and reported_bitrate >= 500:
+            expected_cutoff = nyquist * 0.95  # ~21kHz for 44.1kHz
+        elif reported_bitrate and reported_bitrate >= 256:
+            expected_cutoff = 20000
+        else:
+            expected_cutoff = 19000
+
+        if cutoff_hz < expected_cutoff:
             # Find closest matching source bitrate
             best_match = None
             best_diff = float("inf")
@@ -523,12 +506,8 @@ class MusicPlayer:
                     best_diff = diff
                     best_match = bitrate
 
-            if reported_bitrate and reported_bitrate >= 256 and cutoff_hz < 19000:
-                verdict = "likely_transcode"
-                estimated_source = best_match
-            elif cutoff_hz < 17000:
-                verdict = "likely_transcode"
-                estimated_source = best_match
+            verdict = "likely_transcode"
+            estimated_source = best_match
 
         return {
             "cutoff_hz": round(cutoff_hz),
@@ -537,103 +516,6 @@ class MusicPlayer:
             "reported_bitrate": reported_bitrate,
             "sample_rate": sample_rate,
         }
-
-    def _run_waveform(self, file_path, num_bars):
-
-        peak_values = []
-        done = threading.Event()
-
-        pipeline = Gst.Pipeline.new("waveform")
-
-        source = Gst.ElementFactory.make("filesrc", "src")
-        source.set_property("location", file_path)
-
-        decoder = Gst.ElementFactory.make("decodebin", "dec")
-        audioconvert = Gst.ElementFactory.make("audioconvert", "conv")
-
-        level = Gst.ElementFactory.make("level", "level")
-        level.set_property("interval", 20000000)  # 20ms intervals
-        level.set_property("post-messages", True)
-
-        fakesink = Gst.ElementFactory.make("fakesink", "sink")
-
-        # Resample to low rate to focus on bass frequencies (< 500 Hz)
-        audioresample = Gst.ElementFactory.make("audioresample", "resample")
-        capsfilter = Gst.ElementFactory.make("capsfilter", "caps")
-        caps = Gst.Caps.from_string("audio/x-raw,rate=1000")
-        capsfilter.set_property("caps", caps)
-
-        if any(elem is None for elem in (source, decoder, audioconvert,
-                                         audioresample, capsfilter, level, fakesink)):
-            return
-
-        for elem in (source, decoder, audioconvert, audioresample,
-                     capsfilter, level, fakesink):
-            pipeline.add(elem)
-
-        source.link(decoder)
-        audioconvert.link(audioresample)
-        audioresample.link(capsfilter)
-        capsfilter.link(level)
-        level.link(fakesink)
-
-        def on_pad_added(_dec, pad, conv):
-            caps = pad.get_current_caps() or pad.query_caps(None)
-            struct_obj = caps.get_structure(0)
-            if struct_obj and struct_obj.get_name().startswith("audio/"):
-                sink_pad = conv.get_static_pad("sink")
-                if not sink_pad.is_linked():
-                    pad.link(sink_pad)
-
-        decoder.connect("pad-added", on_pad_added, audioconvert)
-
-        bus = pipeline.get_bus()
-        bus.add_signal_watch()
-
-        def on_message(_bus, message):
-            if message.type == Gst.MessageType.EOS:
-                done.set()
-            elif message.type == Gst.MessageType.ERROR:
-                done.set()
-            elif message.type == Gst.MessageType.ELEMENT:
-                structure = message.get_structure()
-                if structure and structure.get_name() == "level":
-                    peak = structure.get_value("peak")
-                    if peak is not None:
-                        # Take max across channels, convert from dB
-                        max_peak = max(peak[i] for i in range(len(peak)))
-                        peak_values.append(max_peak)
-
-        bus.connect("message", on_message)
-
-        pipeline.set_state(Gst.State.PLAYING)
-        done.wait(timeout=300)
-        pipeline.set_state(Gst.State.NULL)
-
-        if not peak_values:
-            return
-
-        # Downsample to num_bars by taking max in each segment
-        total = len(peak_values)
-        waveform = []
-        for i in range(num_bars):
-            start = int(i * total / num_bars)
-            end = int((i + 1) * total / num_bars)
-            end = max(end, start + 1)
-            segment_max = max(peak_values[start:end])
-            waveform.append(segment_max)
-
-        # Convert dB to linear amplitude (0.0-1.0)
-        # dB = 20 * log10(amplitude), so amplitude = 10^(dB/20)
-        import math
-        normalized = []
-        for val in waveform:
-            if val <= -60:
-                normalized.append(0.0)
-            else:
-                normalized.append(10.0 ** (val / 20.0))
-
-        events.emit_main_thread("music-player-waveform-ready", file_path, normalized)
 
     def _quit(self):
 
