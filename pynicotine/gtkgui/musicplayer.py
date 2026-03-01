@@ -6,6 +6,7 @@ import os
 import time
 
 from gi.repository import Gdk
+from gi.repository import Gio
 from gi.repository import GLib
 from gi.repository import GObject
 from gi.repository import Gtk
@@ -44,7 +45,6 @@ class MusicPlayerPanel:
             self.position_label,
             self.prev_button,
             self.seek_box,
-            self.seek_scale,
             self.spectrogram_area,
             self.spectrogram_box,
             self.stop_button,
@@ -52,7 +52,8 @@ class MusicPlayerPanel:
             self.track_title_label,
             self.verdict_label,
             self.volume_box,
-            self.volume_scale
+            self.volume_scale,
+            self.waveform_area
         ) = ui.load(scope=self, path="musicplayer.ui")
 
         self.window = window
@@ -62,6 +63,12 @@ class MusicPlayerPanel:
         self._seeking = False     # True while user is dragging the seek bar
         self._spectrogram = None  # numpy 2D array of spectrogram data
         self._analysis_result = None
+        self._waveform_data = None       # list of 0.0-1.0 floats for waveform bars
+        self._playback_progress = 0.0    # 0.0-1.0 playback position
+        self._playback_duration = 0.0    # total duration in seconds
+        self._current_playing_file = None  # track which file is loaded
+        self._folder_monitor = None      # Gio.FileMonitor for current folder
+        self._refresh_timer_id = None    # debounce timer for folder refresh
 
         # Append our container into the mainwindow's music_player_container
         if GTK_API_VERSION >= 4:
@@ -73,6 +80,7 @@ class MusicPlayerPanel:
         self.file_list_view = TreeView(
             window, parent=self.file_list_container, name="music_player_files",
             activate_row_callback=self.on_file_activated,
+            select_row_callback=self.on_file_selected,
             persistent_widths=True,
             columns={
                 "icon": {
@@ -110,11 +118,39 @@ class MusicPlayerPanel:
             }
         )
 
+        # Capture space key to toggle play/pause instead of activating tree rows
+        if GTK_API_VERSION >= 4:
+            key_controller = Gtk.EventControllerKey()
+            key_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            key_controller.connect("key-pressed", self._on_key_pressed)
+            self.container.add_controller(key_controller)
+        else:
+            self.container.connect("key-press-event", self._on_key_pressed_gtk3)
+
         # Spectrogram drawing
         if GTK_API_VERSION >= 4:
             self.spectrogram_area.set_draw_func(self._draw_spectrogram)
         else:
             self.spectrogram_area.connect("draw", self._draw_spectrogram_gtk3)
+
+        # Waveform drawing + seek gestures
+        if GTK_API_VERSION >= 4:
+            self.waveform_area.set_draw_func(self._draw_waveform)
+
+            click_gesture = Gtk.GestureClick()
+            click_gesture.connect("pressed", self._on_waveform_clicked)
+            self.waveform_area.add_controller(click_gesture)
+
+            drag_gesture = Gtk.GestureDrag()
+            drag_gesture.connect("drag-update", self._on_waveform_dragged)
+            self.waveform_area.add_controller(drag_gesture)
+        else:
+            self.waveform_area.connect("draw", self._draw_waveform_gtk3)
+            self.waveform_area.add_events(
+                Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_MOTION_MASK
+            )
+            self.waveform_area.connect("button-press-event", self._on_waveform_clicked_gtk3)
+            self.waveform_area.connect("motion-notify-event", self._on_waveform_dragged_gtk3)
 
         # Connect events
         for event_name, callback in (
@@ -122,6 +158,7 @@ class MusicPlayerPanel:
             ("music-player-position-updated", self._on_position_updated),
             ("music-player-spectrum-data", self._on_spectrum_data),
             ("music-player-analysis-complete", self._on_analysis_complete),
+            ("music-player-waveform-ready", self._on_waveform_ready),
         ):
             events.connect(event_name, callback)
 
@@ -145,6 +182,7 @@ class MusicPlayerPanel:
         self._current_folder = folder_path
         self._file_list.clear()
         self.file_list_view.clear()
+        self._watch_folder(folder_path)
 
         try:
             entries = sorted(os.listdir(folder_path))
@@ -225,7 +263,101 @@ class MusicPlayerPanel:
             folder = selected if isinstance(selected, str) else selected[0]
             self._load_folder(folder)
 
+    def _watch_folder(self, folder_path):
+        """Set up a file monitor on the current folder."""
+
+        # Cancel previous monitor
+        if self._folder_monitor is not None:
+            self._folder_monitor.cancel()
+            self._folder_monitor = None
+
+        try:
+            gfile = Gio.File.new_for_path(folder_path)
+            self._folder_monitor = gfile.monitor_directory(
+                Gio.FileMonitorFlags.NONE, None
+            )
+            self._folder_monitor.connect("changed", self._on_folder_changed)
+        except GLib.Error:
+            self._folder_monitor = None
+
+    def _on_folder_changed(self, _monitor, _file, _other_file, event_type):
+        """Called when a file is added, removed, or changed in the watched folder."""
+
+        if event_type not in (
+            Gio.FileMonitorEvent.CREATED,
+            Gio.FileMonitorEvent.DELETED,
+            Gio.FileMonitorEvent.MOVED_IN,
+            Gio.FileMonitorEvent.MOVED_OUT,
+        ):
+            return
+
+        # Debounce: wait 1 second after the last change before refreshing
+        if self._refresh_timer_id is not None:
+            GLib.source_remove(self._refresh_timer_id)
+
+        self._refresh_timer_id = GLib.timeout_add_seconds(1, self._refresh_folder)
+
+    def _refresh_folder(self):
+        """Reload the current folder, preserving the currently playing file."""
+
+        self._refresh_timer_id = None
+
+        if self._current_folder and os.path.isdir(self._current_folder):
+            # Remember what's playing so we can restore _current_index
+            playing_path = None
+            if 0 <= self._current_index < len(self._file_list):
+                playing_path = self._file_list[self._current_index]
+
+            self._load_folder(self._current_folder)
+
+            # Restore current index if the file is still present
+            if playing_path and playing_path in self._file_list:
+                self._current_index = self._file_list.index(playing_path)
+
+        return GLib.SOURCE_REMOVE
+
+    def _on_key_pressed(self, _controller, keyval, _keycode, _state):
+        """GTK 4: intercept space to toggle play/pause."""
+
+        if keyval == Gdk.KEY_space:
+            self.on_play_pause()
+            return Gdk.EVENT_STOP
+
+        return Gdk.EVENT_PROPAGATE
+
+    def _on_key_pressed_gtk3(self, _widget, event):
+        """GTK 3: intercept space to toggle play/pause."""
+
+        if event.keyval == Gdk.KEY_space:
+            self.on_play_pause()
+            return True
+
+        return False
+
+    def on_file_selected(self, _treeview, iterator):
+        """Single click/select: play audio files, ignore folders."""
+
+        if iterator is None:
+            return
+
+        file_path = self.file_list_view.get_row_value(iterator, "path_data")
+        if not file_path or os.path.isdir(file_path):
+            return
+
+        # Don't restart if this file is already loaded (handles pause/resume via space)
+        if file_path == self._current_playing_file:
+            return
+
+        if core.musicplayer is not None:
+            core.musicplayer.play(file_path)
+
+            try:
+                self._current_index = self._file_list.index(file_path)
+            except ValueError:
+                self._current_index = -1
+
     def on_file_activated(self, _list_view, _iterator, _column_id):
+        """Double click: navigate into folders."""
 
         iterator = self.file_list_view.get_selected_rows()
         if not iterator:
@@ -238,20 +370,8 @@ class MusicPlayerPanel:
         if not file_path:
             return
 
-        # If it's a directory, navigate into it
         if os.path.isdir(file_path):
             self._load_folder(file_path)
-            return
-
-        # Play the file
-        if core.musicplayer is not None:
-            core.musicplayer.play(file_path)
-
-            # Update current index
-            try:
-                self._current_index = self._file_list.index(file_path)
-            except ValueError:
-                self._current_index = -1
 
     def on_play_pause(self, *_args):
 
@@ -289,13 +409,6 @@ class MusicPlayerPanel:
         self._current_index = min(len(self._file_list) - 1, self._current_index + 1)
         core.musicplayer.play(self._file_list[self._current_index])
 
-    def on_seek_changed(self, _scale, _scroll_type, value):
-
-        if core.musicplayer is not None:
-            core.musicplayer.seek(value)
-
-        return False
-
     def on_volume_changed(self, scale):
 
         value = scale.get_value() / 100.0
@@ -312,15 +425,23 @@ class MusicPlayerPanel:
 
         if state == "playing":
             self.play_button.set_icon_name("media-playback-pause-symbolic")
-            self._update_track_info(file_path)
 
-            # Auto-analyze on play
-            if file_path and core.musicplayer is not None:
+            # Only regenerate waveform/analysis for a new track, not on resume
+            is_new_track = (file_path != self._current_playing_file)
+            if is_new_track and file_path and core.musicplayer is not None:
+                self._current_playing_file = file_path
+                self._update_track_info(file_path)
+
+                self._waveform_data = None
+                self._playback_progress = 0.0
+                self.waveform_area.queue_draw()
+
                 self.verdict_label.set_text(_("Analyzing..."))
                 self._spectrogram = None
                 self._analysis_result = None
                 self.spectrogram_area.queue_draw()
-                core.musicplayer.analyze_file(file_path)
+
+                core.musicplayer.analyze_and_generate_waveform(file_path)
 
         elif state == "paused":
             self.play_button.set_icon_name("media-playback-start-symbolic")
@@ -328,7 +449,9 @@ class MusicPlayerPanel:
             self.play_button.set_icon_name("media-playback-start-symbolic")
             self.position_label.set_text("0:00")
             self.duration_label.set_text("0:00")
-            self.seek_scale.get_adjustment().set_value(0)
+            self._playback_progress = 0.0
+            self._current_playing_file = None
+            self.waveform_area.queue_draw()
 
     def _update_track_info(self, file_path):
 
@@ -358,9 +481,9 @@ class MusicPlayerPanel:
         self.position_label.set_text(self._format_time(current))
         self.duration_label.set_text(self._format_time(duration))
 
-        adjustment = self.seek_scale.get_adjustment()
-        adjustment.set_upper(max(duration, 1))
-        adjustment.set_value(current)
+        self._playback_duration = duration
+        self._playback_progress = current / max(duration, 0.001)
+        self.waveform_area.queue_draw()
 
     def _on_spectrum_data(self, magnitudes):
         # Real-time spectrum data during playback (could be used for live visualizer)
@@ -394,6 +517,105 @@ class MusicPlayerPanel:
 
         self.verdict_label.set_text(text)
         self.spectrogram_area.queue_draw()
+
+    def _on_waveform_ready(self, file_path, waveform_data):
+
+        self._waveform_data = waveform_data
+        self.waveform_area.queue_draw()
+
+    # Waveform Seek Bar #
+
+    def _draw_waveform_gtk3(self, widget, cr):
+        """GTK 3 draw signal handler."""
+
+        allocation = widget.get_allocation()
+        self._render_waveform(cr, allocation.width, allocation.height)
+
+    def _draw_waveform(self, area, cr, width, height):
+        """GTK 4 draw function."""
+
+        self._render_waveform(cr, width, height)
+
+    def _render_waveform(self, cr, width, height):
+        """Render SoundCloud-style waveform bars with progress coloring."""
+
+        if not self._waveform_data:
+            return
+
+        num_bars = len(self._waveform_data)
+        bar_gap = 1
+        bar_width = max(1, (width - (num_bars - 1) * bar_gap) / num_bars)
+        center_y = height / 2
+        max_bar_height = height * 0.9
+
+        progress_x = self._playback_progress * width
+
+        for i, amplitude in enumerate(self._waveform_data):
+            x = i * (bar_width + bar_gap)
+
+            scaled = amplitude
+            bar_height = max(2, scaled * max_bar_height)
+
+            # Played = bright blue, unplayed = dim blue
+            if x + bar_width <= progress_x:
+                cr.set_source_rgb(0.25, 0.55, 1.0)
+            elif x < progress_x:
+                played_width = progress_x - x
+                cr.set_source_rgb(0.25, 0.55, 1.0)
+                cr.rectangle(x, center_y - bar_height / 2, played_width, bar_height)
+                cr.fill()
+                cr.set_source_rgb(0.2, 0.3, 0.45)
+                cr.rectangle(x + played_width, center_y - bar_height / 2,
+                             bar_width - played_width, bar_height)
+                cr.fill()
+                continue
+            else:
+                cr.set_source_rgb(0.2, 0.3, 0.45)
+
+            cr.rectangle(x, center_y - bar_height / 2, bar_width, bar_height)
+            cr.fill()
+
+    def _seek_from_waveform_x(self, x, width):
+        """Seek to position based on x coordinate within waveform area."""
+
+        if core.musicplayer is None or self._playback_duration <= 0:
+            return
+
+        ratio = max(0.0, min(1.0, x / max(width, 1)))
+        target = ratio * self._playback_duration
+        core.musicplayer.seek(target)
+
+    def _on_waveform_clicked(self, gesture, _n_press, x, _y):
+        """GTK 4: click on waveform to seek."""
+
+        width = self.waveform_area.get_width()
+        self._seek_from_waveform_x(x, width)
+
+    def _on_waveform_dragged(self, gesture, offset_x, _offset_y):
+        """GTK 4: drag on waveform to scrub."""
+
+        success, start_x, _ = gesture.get_start_point()
+        if not success:
+            return
+
+        x = start_x + offset_x
+        width = self.waveform_area.get_width()
+        self._seek_from_waveform_x(x, width)
+
+    def _on_waveform_clicked_gtk3(self, widget, event):
+        """GTK 3: click on waveform to seek."""
+
+        width = widget.get_allocation().width
+        self._seek_from_waveform_x(event.x, width)
+        return True
+
+    def _on_waveform_dragged_gtk3(self, widget, event):
+        """GTK 3: drag on waveform to scrub."""
+
+        if event.state & Gdk.ModifierType.BUTTON1_MASK:
+            width = widget.get_allocation().width
+            self._seek_from_waveform_x(event.x, width)
+        return True
 
     # Spectrogram Drawing #
 
@@ -552,6 +774,14 @@ class MusicPlayerPanel:
         self.window.music_player_container.set_visible(not visible)
 
     def destroy(self):
+
+        if self._folder_monitor is not None:
+            self._folder_monitor.cancel()
+            self._folder_monitor = None
+
+        if self._refresh_timer_id is not None:
+            GLib.source_remove(self._refresh_timer_id)
+            self._refresh_timer_id = None
 
         self.file_list_view.destroy()
         self.__dict__.clear()

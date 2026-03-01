@@ -49,7 +49,7 @@ class MusicPlayer:
 
     __slots__ = ("_pipeline", "_playbin", "_spectrum_element", "_volume_element",
                  "_current_file", "_state", "_position_timer_id",
-                 "_analysis_pipeline", "_analysis_thread", "_spectrogram_data",
+                 "_analysis_pipeline", "_background_thread", "_spectrogram_data",
                  "_sample_rate", "_volume")
 
     def __init__(self):
@@ -62,7 +62,7 @@ class MusicPlayer:
         self._state = STATE_STOPPED
         self._position_timer_id = None
         self._analysis_pipeline = None
-        self._analysis_thread = None
+        self._background_thread = None
         self._spectrogram_data = []
         self._sample_rate = 44100
         self._volume = config.sections.get("players", {}).get("volume", 100) / 100.0
@@ -250,7 +250,29 @@ class MusicPlayer:
         if self._pipeline is None or self._state != STATE_PAUSED:
             return
 
-        self._pipeline.set_state(Gst.State.PLAYING)
+        # Query current position before resuming
+        success, position = self._pipeline.query_position(Gst.Format.TIME)
+
+        ret = self._pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            log.add("Music player: failed to resume, rebuilding pipeline")
+            # Rebuild pipeline and seek to saved position
+            if self._current_file:
+                pos_seconds = position / Gst.SECOND if success else 0
+                self._state = STATE_STOPPED
+                self.play(self._current_file)
+                if pos_seconds > 0:
+                    self.seek(pos_seconds)
+            return
+
+        # Flush-seek to current position to kick-start audio output
+        if success and position > 0:
+            self._pipeline.seek_simple(
+                Gst.Format.TIME,
+                Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                position
+            )
+
         self._state = STATE_PLAYING
         self._start_position_updates()
         events.emit("music-player-state-changed", self._state, self._current_file)
@@ -338,28 +360,31 @@ class MusicPlayer:
 
     # Spectrogram Analysis #
 
-    def analyze_file(self, file_path):
-        """Run full-file spectral analysis in a background thread."""
+    def analyze_and_generate_waveform(self, file_path, num_bars=150):
+        """Run waveform generation then spectral analysis sequentially in one thread."""
 
         if not GSTREAMER_AVAILABLE:
             log.add("GStreamer not available, cannot analyze audio")
             return
 
-        if not NUMPY_AVAILABLE:
-            log.add("NumPy not available, cannot analyze audio")
-            return
-
         if not os.path.isfile(file_path):
             return
 
-        if self._analysis_thread is not None and self._analysis_thread.is_alive():
+        if self._background_thread is not None and self._background_thread.is_alive():
             return
 
-        self._analysis_thread = threading.Thread(
-            target=self._run_analysis, args=(file_path,),
-            name="AudioAnalysisThread", daemon=True
+        self._background_thread = threading.Thread(
+            target=self._run_background_tasks, args=(file_path, num_bars),
+            name="AudioBackgroundThread", daemon=True
         )
-        self._analysis_thread.start()
+        self._background_thread.start()
+
+    def _run_background_tasks(self, file_path, num_bars):
+        """Run waveform first, then analysis — sequentially to avoid GStreamer crashes."""
+
+        self._run_waveform(file_path, num_bars)
+        if NUMPY_AVAILABLE:
+            self._run_analysis(file_path)
 
     def _run_analysis(self, file_path):
 
@@ -513,9 +538,106 @@ class MusicPlayer:
             "sample_rate": sample_rate,
         }
 
+    def _run_waveform(self, file_path, num_bars):
+
+        peak_values = []
+        done = threading.Event()
+
+        pipeline = Gst.Pipeline.new("waveform")
+
+        source = Gst.ElementFactory.make("filesrc", "src")
+        source.set_property("location", file_path)
+
+        decoder = Gst.ElementFactory.make("decodebin", "dec")
+        audioconvert = Gst.ElementFactory.make("audioconvert", "conv")
+
+        level = Gst.ElementFactory.make("level", "level")
+        level.set_property("interval", 20000000)  # 20ms intervals
+        level.set_property("post-messages", True)
+
+        fakesink = Gst.ElementFactory.make("fakesink", "sink")
+
+        # Resample to low rate to focus on bass frequencies (< 500 Hz)
+        audioresample = Gst.ElementFactory.make("audioresample", "resample")
+        capsfilter = Gst.ElementFactory.make("capsfilter", "caps")
+        caps = Gst.Caps.from_string("audio/x-raw,rate=1000")
+        capsfilter.set_property("caps", caps)
+
+        if any(elem is None for elem in (source, decoder, audioconvert,
+                                         audioresample, capsfilter, level, fakesink)):
+            return
+
+        for elem in (source, decoder, audioconvert, audioresample,
+                     capsfilter, level, fakesink):
+            pipeline.add(elem)
+
+        source.link(decoder)
+        audioconvert.link(audioresample)
+        audioresample.link(capsfilter)
+        capsfilter.link(level)
+        level.link(fakesink)
+
+        def on_pad_added(_dec, pad, conv):
+            caps = pad.get_current_caps() or pad.query_caps(None)
+            struct_obj = caps.get_structure(0)
+            if struct_obj and struct_obj.get_name().startswith("audio/"):
+                sink_pad = conv.get_static_pad("sink")
+                if not sink_pad.is_linked():
+                    pad.link(sink_pad)
+
+        decoder.connect("pad-added", on_pad_added, audioconvert)
+
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+
+        def on_message(_bus, message):
+            if message.type == Gst.MessageType.EOS:
+                done.set()
+            elif message.type == Gst.MessageType.ERROR:
+                done.set()
+            elif message.type == Gst.MessageType.ELEMENT:
+                structure = message.get_structure()
+                if structure and structure.get_name() == "level":
+                    peak = structure.get_value("peak")
+                    if peak is not None:
+                        # Take max across channels, convert from dB
+                        max_peak = max(peak[i] for i in range(len(peak)))
+                        peak_values.append(max_peak)
+
+        bus.connect("message", on_message)
+
+        pipeline.set_state(Gst.State.PLAYING)
+        done.wait(timeout=300)
+        pipeline.set_state(Gst.State.NULL)
+
+        if not peak_values:
+            return
+
+        # Downsample to num_bars by taking max in each segment
+        total = len(peak_values)
+        waveform = []
+        for i in range(num_bars):
+            start = int(i * total / num_bars)
+            end = int((i + 1) * total / num_bars)
+            end = max(end, start + 1)
+            segment_max = max(peak_values[start:end])
+            waveform.append(segment_max)
+
+        # Convert dB to linear amplitude (0.0-1.0)
+        # dB = 20 * log10(amplitude), so amplitude = 10^(dB/20)
+        import math
+        normalized = []
+        for val in waveform:
+            if val <= -60:
+                normalized.append(0.0)
+            else:
+                normalized.append(10.0 ** (val / 20.0))
+
+        events.emit_main_thread("music-player-waveform-ready", file_path, normalized)
+
     def _quit(self):
 
         self.stop()
 
-        if self._analysis_thread is not None and self._analysis_thread.is_alive():
-            self._analysis_thread.join(timeout=2)
+        if self._background_thread is not None and self._background_thread.is_alive():
+            self._background_thread.join(timeout=2)

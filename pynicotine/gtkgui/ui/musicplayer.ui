@@ -55,7 +55,7 @@
             <property name="hexpand">True</property>
             <property name="vexpand">True</property>
             <property name="visible">True</property>
-            <property name="min-content-width">350</property>
+            <property name="min-content-width">455</property>
           </object>
         </child>
       </object>
@@ -146,7 +146,7 @@
       </object>
     </child>
 
-    <!-- Seek Bar -->
+    <!-- Waveform Seek Bar -->
     <child>
       <object class="GtkBox" id="seek_box">
         <property name="margin-start">6</property>
@@ -164,18 +164,11 @@
           </object>
         </child>
         <child>
-          <object class="GtkScale" id="seek_scale">
+          <object class="GtkDrawingArea" id="waveform_area">
+            <property name="height-request">40</property>
+            <property name="width-request">1</property>
             <property name="hexpand">True</property>
-            <property name="draw-value">False</property>
             <property name="visible">True</property>
-            <property name="adjustment">
-              <object class="GtkAdjustment" id="_seek_adjustment">
-                <property name="lower">0</property>
-                <property name="upper">100</property>
-                <property name="step-increment">1</property>
-              </object>
-            </property>
-            <signal name="change-value" handler="on_seek_changed"/>
           </object>
         </child>
         <child>
