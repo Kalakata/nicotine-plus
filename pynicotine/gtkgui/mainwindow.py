@@ -182,10 +182,6 @@ class MainWindow(Window):
 
             self.header_bar.set_show_title_buttons(True)
 
-            self.music_paned.set_resize_start_child(False)
-            self.music_paned.set_shrink_start_child(False)
-            self.music_paned.set_resize_end_child(True)
-
             self.horizontal_paned.set_resize_start_child(True)
             self.horizontal_paned.set_shrink_start_child(False)
             self.horizontal_paned.set_resize_end_child(False)
@@ -208,10 +204,6 @@ class MainWindow(Window):
         else:
             self.header_bar.set_has_subtitle(False)
             self.header_bar.set_show_close_button(True)
-
-            self.music_paned.child_set_property(self.music_player_container, "resize", False)
-            self.music_paned.child_set_property(self.music_player_container, "shrink", False)
-            self.music_paned.child_set_property(self.horizontal_paned, "resize", True)
 
             self.horizontal_paned.child_set_property(self.vertical_paned, "resize", True)
             self.horizontal_paned.child_set_property(self.vertical_paned, "shrink", False)

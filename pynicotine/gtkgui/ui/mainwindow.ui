@@ -1483,12 +1483,13 @@
     <property name="visible">True</property>
     <property name="width-request">580</property>
     <child>
-      <object class="GtkPaned" id="music_paned">
+      <object class="GtkBox" id="music_paned">
         <property name="vexpand">True</property>
         <property name="visible">True</property>
         <child>
           <object class="GtkBox" id="music_player_container">
             <property name="visible">False</property>
+            <property name="width-request">300</property>
           </object>
         </child>
         <child>
