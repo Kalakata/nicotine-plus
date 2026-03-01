@@ -3,13 +3,14 @@
   SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# Nicotine+
+# Nicotine+ (Fork)
 
 <img src="data/icons/icon.svg" alt="Nicotine+ Logo" align="right"
  width="128" height="128">
 
-Nicotine+ is a graphical client for the [Soulseek](https://www.slsknet.org/news/)
-peer-to-peer network.
+A fork of [Nicotine+](https://github.com/nicotine-plus/nicotine-plus), the
+graphical client for the [Soulseek](https://www.slsknet.org/news/) peer-to-peer
+network, with an integrated music player and audio analysis tools.
 
 Share files, chat, and find people with similar interests. Nicotine+
 is user-friendly, fast, free, and open source. It provides features
@@ -19,8 +20,29 @@ compatible with other Soulseek clients.
 Nicotine+ is written in Python, and uses GTK for its graphical user
 interface.
 
-Check out the [screenshots](data/screenshots/SCREENSHOTS.md)
-and [source code](https://github.com/nicotine-plus/nicotine-plus).
+
+## Fork Features
+
+### Integrated Music Player
+A sidebar music player powered by GStreamer for previewing your shared files
+directly within the client.
+
+- **Local file browser** — browse and play audio files from your shared folders
+- **Folder monitoring** — automatically detects changes in your music library
+- **Playback controls** — play, pause, next, previous, and volume control
+- **Waveform seek bar** — visual waveform display with click-to-seek
+
+### Spectrogram Analyzer
+Real-time spectral analysis for evaluating audio quality, powered by librosa
+and numpy.
+
+- **Full spectrogram display** — frequency vs. time visualization (Spek-style)
+- **Transcode detection** — automatically identifies lossy-to-lossless transcodes
+  by detecting frequency cutoffs
+- **Quality scoring** — rates audio quality based on spectral analysis
+- **Bitrate reference lines** — visual guides for common MP3 bitrate cutoffs
+  (128k, 192k, 320k)
+- **Zoom and pan** — scroll to zoom into frequency ranges, drag to pan
 
 
 ## Download

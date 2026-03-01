@@ -128,6 +128,14 @@ def set_up_python():
         executable_folder = os.path.dirname(sys.executable)
         os.environ["SSL_CERT_FILE"] = os.path.join(executable_folder, "lib/cert.pem")
 
+        # GStreamer plugin path for bundled music player
+        gst_plugin_dir = os.path.join(executable_folder, "lib/gstreamer-1.0")
+        if os.path.isdir(gst_plugin_dir):
+            os.environ["GST_PLUGIN_PATH"] = gst_plugin_dir
+            os.environ["GST_PLUGIN_SYSTEM_PATH"] = ""
+            os.environ["GST_PLUGIN_SCANNER"] = ""
+            os.environ["GST_REGISTRY_FORK"] = "no"
+
         # Support file scanning process in frozen binaries
         multiprocessing.freeze_support()
 

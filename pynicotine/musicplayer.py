@@ -16,7 +16,7 @@ try:
     from gi.repository import Gst
     Gst.init(None)
     GSTREAMER_AVAILABLE = True
-except (ImportError, ValueError):
+except Exception:
     pass
 
 NUMPY_AVAILABLE = False
@@ -24,7 +24,7 @@ NUMPY_AVAILABLE = False
 try:
     import numpy as np
     NUMPY_AVAILABLE = True
-except ImportError:
+except Exception:
     pass
 
 LIBROSA_AVAILABLE = False
@@ -32,7 +32,7 @@ LIBROSA_AVAILABLE = False
 try:
     import librosa
     LIBROSA_AVAILABLE = True
-except ImportError:
+except Exception:
     pass
 
 
