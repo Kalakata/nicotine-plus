@@ -45,68 +45,35 @@ and numpy.
 - **Zoom and pan** — scroll to zoom into frequency ranges, drag to pan
 
 
-## Download
+## Building
 
-The current stable version of Nicotine+ is 3.3.10, released on March 10, 2025.
-See the [release notes](NEWS.md).
+### Requirements
+- Python 3.9+
+- GTK 4 / PyGObject
+- GStreamer (for music player)
+- numpy, librosa (for spectrogram analysis)
 
-Downloads are available for:
+### Run from source
+```bash
+brew install gtk4 pygobject3 gstreamer gst-plugins-base gst-plugins-good
+pip install numpy librosa
+python3 -m pynicotine
+```
 
- - [GNU/Linux, *BSD, Haiku and Solaris](doc/DOWNLOADS.md#gnulinux-bsd-haiku-solaris)
- - [Windows](doc/DOWNLOADS.md#windows)
- - [macOS](doc/DOWNLOADS.md#macos)
+### Build macOS .dmg
+```bash
+python3 build-aux/macos/dependencies.py
+cd build-aux/macos && python3 setup.py bdist_dmg
+```
 
-
-## Get Involved
-
-If you feel like contributing to Nicotine+, there are several ways to get
-involved:
-
- - [Issue Tracker](https://github.com/nicotine-plus/nicotine-plus/issues)
-     – Report a problem or suggest improvements
- - [Testing](doc/TESTING.md)
-     – Download the latest unstable build and help test Nicotine+
- - [Translations](doc/TRANSLATIONS.md)
-     – Translate Nicotine+ into another language with [Weblate](https://hosted.weblate.org/engage/nicotine-plus)
- - [Packaging](doc/PACKAGING.md)
-     – Package Nicotine+ for a distribution or operating system
- - [Development](doc/DEVELOPING.md)
-     – Implement bug fixes, enhancements or new features
- - [IRC Channel](https://web.libera.chat/?channel=#nicotine+)
-     – Chat in the #nicotine+ IRC channel on [Libera.Chat](https://libera.chat/)
+The `.dmg` will be in `build-aux/macos/build/`.
 
 
-## Where did the name Nicotine come from?
+## Based on
 
-> I was in a geeky mood and was browsing bash.org's QDB.  
-I stumbled across this quote:  
->> **\<etc>** so tempting to release a product called 'nicotine' and wait for
->> the patches.  
->> **\<etc>** then i would have a reason to only apply one patch a day.
->> otherwise, i'm going against medical advise.  
->
-> So I thought what the hell and bluntly stole etc's idea.
+This is a fork of [Nicotine+](https://github.com/nicotine-plus/nicotine-plus).
+All original Nicotine+ features (file sharing, chat, search, transfers) are
+fully preserved.
 
-— <cite>Hyriand, former Nicotine maintainer, 2003</cite>
-
-
-## Legal and Privacy
-
-The Nicotine+ Team does not collect any data used or stored by the client.
-Different policies may apply for data sent to the default Soulseek server,
-which is not operated by the Nicotine+ Team.
-
-When connecting to the default Soulseek server, you agree to abide by the
-Soulseek [rules](https://www.slsknet.org/news/node/681) and
-[terms of service](https://www.slsknet.org/news/node/682).
-
-Soulseek is an unencrypted protocol not intended for secure communication.
-
-
-## Authors
-
-Nicotine+ is free and open source software, released under the terms of the
+Licensed under the
 [GNU General Public License v3.0 or later](https://www.gnu.org/licenses/gpl-3.0-standalone.html).
-Nicotine+ exists thanks to its [authors](AUTHORS.md).
-
-© 2001–2026 Nicotine+, Nicotine and PySoulSeek Contributors

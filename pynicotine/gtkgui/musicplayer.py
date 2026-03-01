@@ -17,7 +17,7 @@ from pynicotine.gtkgui.application import GTK_API_VERSION
 from pynicotine.gtkgui.widgets import ui
 from pynicotine.gtkgui.widgets.dialogs import EntryDialog
 from pynicotine.gtkgui.widgets.dialogs import OptionDialog
-from pynicotine.gtkgui.widgets.filechooser import FileChooser
+from pynicotine.gtkgui.widgets.filechooser import FolderChooser
 from pynicotine.gtkgui.widgets.popupmenu import PopupMenu
 from pynicotine.gtkgui.widgets.treeview import TreeView
 from pynicotine.logfacility import log
@@ -67,6 +67,7 @@ class MusicPlayerPanel:
         self._current_index = -1  # index in _file_list of currently playing file
         self._seeking = False     # True while user is dragging the seek bar
         self._spectrogram = None  # numpy 2D array of spectrogram data
+        self._spectrogram_surface = None  # pre-rendered cairo.ImageSurface
         self._analysis_result = None
         self._waveform_data = None       # list of 0.0-1.0 floats for waveform bars
         self._playback_progress = 0.0    # 0.0-1.0 playback position
@@ -333,13 +334,11 @@ class MusicPlayerPanel:
 
     def on_choose_folder(self, *_args):
 
-        FileChooser(
-            parent=self.window.widget,
+        FolderChooser(
+            application=self.window.application,
             callback=self._on_folder_chosen,
             title=_("Choose Music Folder"),
-            select_multiple=False,
-            action="select_folder"
-        )
+        ).present()
 
     def _on_folder_chosen(self, selected, *_args):
 
@@ -419,7 +418,7 @@ class MusicPlayerPanel:
         return False
 
     def on_file_selected(self, _treeview, iterator):
-        """Single click/select: play audio files, ignore folders."""
+        """Single click/select: track selection index only."""
 
         if iterator is None:
             return
@@ -428,25 +427,13 @@ class MusicPlayerPanel:
         if not file_path or os.path.isdir(file_path):
             return
 
-        # Don't restart if this file is already loaded (handles pause/resume via space)
-        if file_path == self._current_playing_file:
-            return
-
-        if core.musicplayer is not None:
-            core.musicplayer.play(file_path)
-
-            # Mark new file as listened and update icon to hollow star
-            if file_path in self._new_files and file_path not in self._listened_files:
-                self._listened_files.add(file_path)
-                self.file_list_view.set_row_value(iterator, "icon", "non-starred-symbolic")
-
-            try:
-                self._current_index = self._file_list.index(file_path)
-            except ValueError:
-                self._current_index = -1
+        try:
+            self._current_index = self._file_list.index(file_path)
+        except ValueError:
+            pass
 
     def on_file_activated(self, _list_view, _iterator, _column_id):
-        """Double click: navigate into folders."""
+        """Double click/Enter: play audio files or navigate into folders."""
 
         iterator = self.file_list_view.get_selected_rows()
         if not iterator:
@@ -461,6 +448,20 @@ class MusicPlayerPanel:
 
         if os.path.isdir(file_path):
             self._load_folder(file_path)
+            return
+
+        if core.musicplayer is not None:
+            core.musicplayer.play(file_path)
+
+            # Mark new file as listened and update icon to hollow star
+            if file_path in self._new_files and file_path not in self._listened_files:
+                self._listened_files.add(file_path)
+                self.file_list_view.set_row_value(row_iter, "icon", "non-starred-symbolic")
+
+            try:
+                self._current_index = self._file_list.index(file_path)
+            except ValueError:
+                self._current_index = -1
 
     def on_play_pause(self, *_args):
 
@@ -508,8 +509,12 @@ class MusicPlayerPanel:
         value = scale.get_value() / 100.0
 
         if core.musicplayer is not None:
-            # Set volume directly on the GStreamer element — no scheduling overhead
             core.musicplayer.set_volume(value)
+
+        # Persist volume setting
+        if "players" not in config.sections:
+            config.sections["players"] = {}
+        config.sections["players"]["volume"] = int(scale.get_value())
 
         return False
 
@@ -643,6 +648,7 @@ class MusicPlayerPanel:
                 self._quality_score = -1
                 self.quality_bar.queue_draw()
                 self._spectrogram = None
+                self._spectrogram_surface = None
                 self._analysis_result = None
                 self._freq_zoom = 1.0
                 self._freq_center = 0.5
@@ -727,6 +733,7 @@ class MusicPlayerPanel:
             detail += f"  (~{estimated} kbps source)"
 
         self.verdict_label.set_text(detail)
+        self._invalidate_spectrogram_surface()
         self.spectrogram_area.queue_draw()
 
     def _on_waveform_ready(self, file_path, waveform_data):
@@ -900,6 +907,7 @@ class MusicPlayerPanel:
         visible_half = 0.5 / self._freq_zoom
         self._freq_center = max(visible_half, min(1.0 - visible_half, self._freq_center))
 
+        self._invalidate_spectrogram_surface()
         self.spectrogram_area.queue_draw()
 
     def _on_spectrogram_scroll(self, _controller, _dx, dy):
@@ -935,6 +943,7 @@ class MusicPlayerPanel:
 
         visible_half = 0.5 / self._freq_zoom
         self._freq_center = max(visible_half, min(1.0 - visible_half, self._freq_center))
+        self._invalidate_spectrogram_surface()
         self.spectrogram_area.queue_draw()
 
     def _on_spectrogram_click(self, gesture, n_press, _x, _y):
@@ -943,6 +952,7 @@ class MusicPlayerPanel:
         if n_press == 2:
             self._freq_zoom = 1.0
             self._freq_center = 0.5
+            self._invalidate_spectrogram_surface()
             self.spectrogram_area.queue_draw()
 
     def _on_spectrogram_click_gtk3(self, widget, event):
@@ -951,6 +961,7 @@ class MusicPlayerPanel:
         if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
             self._freq_zoom = 1.0
             self._freq_center = 0.5
+            self._invalidate_spectrogram_surface()
             self.spectrogram_area.queue_draw()
         return True
 
@@ -970,6 +981,7 @@ class MusicPlayerPanel:
 
         visible_half = 0.5 / self._freq_zoom
         self._freq_center = max(visible_half, min(1.0 - visible_half, self._freq_center))
+        self._invalidate_spectrogram_surface()
         self.spectrogram_area.queue_draw()
         return True
 
@@ -1002,6 +1014,74 @@ class MusicPlayerPanel:
         visible_ratio = (full_ratio - view_lo) / (view_hi - view_lo)
 
         return plot_height - (visible_ratio * plot_height)
+
+    def _build_spectrogram_surface(self, plot_width, plot_height):
+        """Pre-render spectrogram to a cairo.ImageSurface for fast blitting."""
+
+        import cairo
+        import numpy as np
+
+        spectrogram = self._spectrogram
+        num_frames = spectrogram.shape[0]
+        num_bands = spectrogram.shape[1]
+
+        urange = 0.0
+        lrange = -120.0
+        db_range = urange - lrange
+
+        visible_half = 0.5 / self._freq_zoom
+        view_lo = self._freq_center - visible_half
+        view_hi = self._freq_center + visible_half
+
+        pw = int(plot_width)
+        ph = int(plot_height)
+
+        # Build pixel buffer using numpy for speed
+        num_cols = min(num_frames, pw)
+        pixels = np.zeros((ph, pw, 4), dtype=np.uint8)
+
+        # Pre-compute color LUT (256 entries)
+        lut = np.zeros((256, 3), dtype=np.uint8)
+        for i in range(256):
+            level = i / 255.0
+            r, g, b = self._spectrogram_color(level)
+            lut[i] = (int(b * 255), int(g * 255), int(r * 255))  # BGRA order
+
+        for col in range(num_cols):
+            frame_idx = int(col * num_frames / num_cols)
+            if frame_idx >= num_frames:
+                break
+            x_start = int(col * pw / num_cols)
+            x_end = int((col + 1) * pw / num_cols)
+
+            for py in range(ph):
+                visible_ratio = 1.0 - (py / ph)
+                full_ratio = view_lo + visible_ratio * (view_hi - view_lo)
+
+                if full_ratio < 0.0 or full_ratio > 1.0:
+                    continue
+
+                band = min(int(full_ratio * num_bands), num_bands - 1)
+                value = max(lrange, min(urange, spectrogram[frame_idx, band]))
+                level_idx = int((value - lrange) / db_range * 255)
+                level_idx = max(0, min(255, level_idx))
+
+                b, g, r = lut[level_idx]
+                pixels[py, x_start:x_end, 0] = b
+                pixels[py, x_start:x_end, 1] = g
+                pixels[py, x_start:x_end, 2] = r
+                pixels[py, x_start:x_end, 3] = 255
+
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, pw, ph)
+        buf = surface.get_data()
+        buf[:] = pixels.tobytes()
+        surface.mark_dirty()
+
+        self._spectrogram_surface = surface
+
+    def _invalidate_spectrogram_surface(self):
+        """Clear cached surface so it gets rebuilt on next draw."""
+        self._spectrogram_surface = None
 
     def _render_spectrogram(self, cr, width, height):
         """Render spectrogram with linear frequency scale (Spek-style)."""
@@ -1041,40 +1121,13 @@ class MusicPlayerPanel:
         nyquist = sample_rate / 2.0
         freq_per_band = nyquist / num_bands
 
-        # Visible frequency window based on zoom/pan
-        visible_half = 0.5 / self._freq_zoom
-        view_lo = self._freq_center - visible_half
-        view_hi = self._freq_center + visible_half
+        # Build or reuse cached surface
+        if self._spectrogram_surface is None:
+            self._build_spectrogram_surface(plot_width, plot_height)
 
-        # Draw spectrogram pixels with linear frequency mapping
-        num_cols = min(num_frames, int(plot_width))
-        x_step = max(1, plot_width / num_cols)
-        num_y_pixels = int(plot_height)
-
-        for col in range(num_cols):
-            frame_idx = int(col * num_frames / num_cols)
-            if frame_idx >= num_frames:
-                break
-
-            x = col * x_step
-
-            for py in range(num_y_pixels):
-                visible_ratio = 1.0 - (py / plot_height)
-                full_ratio = view_lo + visible_ratio * (view_hi - view_lo)
-
-                if full_ratio < 0.0 or full_ratio > 1.0:
-                    continue
-
-                band = min(int(full_ratio * num_bands), num_bands - 1)
-
-                # Clamp to dB range and normalize to 0-1 (Spek approach)
-                value = max(lrange, min(urange, spectrogram[frame_idx, band]))
-                level = (value - lrange) / db_range
-
-                r, g, b = self._spectrogram_color(level)
-                cr.set_source_rgb(r, g, b)
-                cr.rectangle(x, py, math.ceil(x_step), 1)
-                cr.fill()
+        if self._spectrogram_surface is not None:
+            cr.set_source_surface(self._spectrogram_surface, 0, 0)
+            cr.paint()
 
         # Bitrate reference lines (dashed)
         cr.set_line_width(0.5)
@@ -1190,13 +1243,18 @@ class MusicPlayerPanel:
 
     @staticmethod
     def _format_time(seconds):
-        """Format seconds as m:ss."""
+        """Format seconds as m:ss or h:mm:ss."""
 
         if seconds <= 0 or math.isinf(seconds) or math.isnan(seconds):
             return "0:00"
 
-        mins = int(seconds // 60)
-        secs = int(seconds % 60)
+        total_secs = int(seconds)
+        hrs = total_secs // 3600
+        mins = (total_secs % 3600) // 60
+        secs = total_secs % 60
+
+        if hrs > 0:
+            return f"{hrs}:{mins:02d}:{secs:02d}"
         return f"{mins}:{secs:02d}"
 
     def toggle_visible(self):
@@ -1206,6 +1264,14 @@ class MusicPlayerPanel:
         self.window.music_player_container.set_visible(not visible)
 
     def destroy(self):
+
+        for event_name, callback in (
+            ("music-player-state-changed", self._on_state_changed),
+            ("music-player-position-updated", self._on_position_updated),
+            ("music-player-analysis-complete", self._on_analysis_complete),
+            ("music-player-waveform-ready", self._on_waveform_ready),
+        ):
+            events.disconnect(event_name, callback)
 
         if self._folder_monitor is not None:
             self._folder_monitor.cancel()

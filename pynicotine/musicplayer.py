@@ -62,7 +62,8 @@ class MusicPlayer:
 
     __slots__ = ("_pipeline", "_playbin", "_volume_element",
                  "_current_file", "_state", "_position_timer_id",
-                 "_background_thread", "_sample_rate", "_volume")
+                 "_background_thread", "_sample_rate", "_volume",
+                 "_lock", "_cancel_event")
 
     def __init__(self):
 
@@ -75,6 +76,8 @@ class MusicPlayer:
         self._background_thread = None
         self._sample_rate = 44100
         self._volume = config.sections.get("players", {}).get("volume", 100) / 100.0
+        self._lock = threading.Lock()
+        self._cancel_event = threading.Event()
 
         for event_name, callback in (
             ("quit", self._quit),
@@ -101,14 +104,16 @@ class MusicPlayer:
 
         self.stop()
 
-        self._current_file = file_path
+        with self._lock:
+            self._current_file = file_path
         self._build_pipeline(file_path)
 
         if self._pipeline is None:
             return
 
         self._pipeline.set_state(Gst.State.PLAYING)
-        self._state = STATE_PLAYING
+        with self._lock:
+            self._state = STATE_PLAYING
         events.emit("music-player-state-changed", self._state, file_path)
 
         self._start_position_updates()
@@ -205,7 +210,8 @@ class MusicPlayer:
             return
 
         self._pipeline.set_state(Gst.State.PAUSED)
-        self._state = STATE_PAUSED
+        with self._lock:
+            self._state = STATE_PAUSED
         self._stop_position_updates()
         events.emit("music-player-state-changed", self._state, self._current_file)
 
@@ -237,7 +243,8 @@ class MusicPlayer:
                 position
             )
 
-        self._state = STATE_PLAYING
+        with self._lock:
+            self._state = STATE_PLAYING
         self._start_position_updates()
         events.emit("music-player-state-changed", self._state, self._current_file)
 
@@ -258,8 +265,10 @@ class MusicPlayer:
 
         self._volume_element = None
 
-        if self._state != STATE_STOPPED:
+        with self._lock:
+            was_stopped = self._state == STATE_STOPPED
             self._state = STATE_STOPPED
+        if not was_stopped:
             events.emit("music-player-state-changed", self._state, self._current_file)
 
     def seek(self, position_seconds):
@@ -351,16 +360,29 @@ class MusicPlayer:
         if not os.path.isfile(file_path):
             return
 
+        # Cancel any running analysis
+        self._cancel_event.set()
         if self._background_thread is not None and self._background_thread.is_alive():
-            return
+            self._background_thread.join(timeout=3)
+
+        self._cancel_event = threading.Event()
+        cancel = self._cancel_event
 
         self._background_thread = threading.Thread(
-            target=self._run_background_tasks, args=(file_path, num_bars),
+            target=self._run_background_tasks, args=(file_path, num_bars, cancel),
             name="AudioBackgroundThread", daemon=True
         )
         self._background_thread.start()
 
-    def _run_background_tasks(self, file_path, num_bars):
+    def _is_cancelled(self, cancel, file_path):
+        """Check if this analysis should abort."""
+
+        if cancel.is_set():
+            return True
+        with self._lock:
+            return self._current_file != file_path
+
+    def _run_background_tasks(self, file_path, num_bars, cancel):
         """Decode audio once, then generate waveform and spectrogram from numpy arrays."""
 
         samples, sample_rate = self._decode_audio(file_path)
@@ -368,14 +390,12 @@ class MusicPlayer:
             log.add("Music player: failed to decode audio for analysis")
             return
 
-        # Abort if file changed or playback stopped
-        if self._current_file != file_path or self._state == STATE_STOPPED:
+        if self._is_cancelled(cancel, file_path):
             return
 
         self._generate_waveform(samples, sample_rate, file_path, num_bars)
 
-        # Abort check again before heavier spectrogram work
-        if self._current_file != file_path or self._state == STATE_STOPPED:
+        if self._is_cancelled(cancel, file_path):
             return
 
         self._generate_spectrogram(samples, sample_rate, file_path)
@@ -427,14 +447,14 @@ class MusicPlayer:
         # GUI expects (num_frames, num_bands) — transpose
         spectrogram = spectrogram_db.T.astype(np.float32)
 
-        result = self._detect_transcode(spectrogram, sample_rate)
+        result = self._detect_transcode(spectrogram, sample_rate, file_path)
 
         events.emit_main_thread(
             "music-player-analysis-complete",
             file_path, spectrogram, result
         )
 
-    def _detect_transcode(self, spectrogram, sample_rate):
+    def _detect_transcode(self, spectrogram, sample_rate, file_path):
         """Analyze spectrogram to detect frequency cutoff indicating a transcode.
 
         Detects the frequency where the spectrum drops to the dB floor,
@@ -482,7 +502,7 @@ class MusicPlayer:
         # Get reported bitrate from TinyTag
         from pynicotine.external.tinytag import TinyTag
         try:
-            tag = TinyTag.get(self._current_file if self._current_file else "")
+            tag = TinyTag.get(file_path)
             reported_bitrate = int(tag.bitrate) if tag.bitrate else None
         except Exception:
             reported_bitrate = None
