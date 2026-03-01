@@ -17,7 +17,15 @@ def install_brew():
                 "gobject-introspection",
                 "gtk4",
                 "libadwaita",
-                "webp-pixbuf-loader"]
+                "webp-pixbuf-loader",
+                "gstreamer",
+                "gst-plugins-base",
+                "gst-plugins-good",
+                "mpg123",
+                "flac",
+                "libvorbis",
+                "opus",
+                "libsndfile"]
 
     subprocess.check_call(["brew", "install", "--quiet"] + packages)
 
@@ -37,7 +45,28 @@ def install_pypi():
         "-e", ".[packaging,tests]",
         "build",
         "setuptools",
-        "wheel"
+        "wheel",
+
+        # Music player: audio analysis and scientific computing
+        "numpy",
+        "librosa",
+        "scipy",
+        "scikit-learn",
+        "numba",
+        "llvmlite",
+        "joblib",
+        "soundfile",
+        "soxr",
+        "lazy_loader",
+        "decorator",
+        "pooch",
+        "audioread",
+
+        # Python 3.13+ removed stdlib modules needed by audioread/soundfile
+        "standard-aifc",
+        "standard-audioop",
+        "standard-chunk",
+        "standard-sunau",
     ])
 
 

@@ -101,7 +101,7 @@ jobs:
           path: ${{ steps.build-snap.outputs.snap }}
 
   windows:
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       matrix:
         include:
@@ -141,6 +141,16 @@ jobs:
             ${{ matrix.prefix }}-python-setuptools
             ${{ matrix.prefix }}-python-wheel
             ${{ matrix.prefix }}-webp-pixbuf-loader
+            ${{ matrix.prefix }}-gstreamer
+            ${{ matrix.prefix }}-gst-plugins-base
+            ${{ matrix.prefix }}-gst-plugins-good
+            ${{ matrix.prefix }}-python-numpy
+            ${{ matrix.prefix }}-python-scipy
+            ${{ matrix.prefix }}-python-scikit-learn
+            ${{ matrix.prefix }}-python-numba
+            ${{ matrix.prefix }}-python-librosa
+            ${{ matrix.prefix }}-python-soundfile
+            ${{ matrix.prefix }}-libsndfile
 
       - name: Install additional dependencies
         run: python3 build-aux/windows/dependencies.py
@@ -174,7 +184,7 @@ jobs:
           - arch: arm64
             platform: macos-15
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

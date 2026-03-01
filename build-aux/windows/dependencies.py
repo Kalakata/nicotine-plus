@@ -23,7 +23,21 @@ def install_pacman():
                 f"{prefix}-python-pylint",
                 f"{prefix}-python-setuptools",
                 f"{prefix}-python-wheel",
-                f"{prefix}-webp-pixbuf-loader"]
+                f"{prefix}-webp-pixbuf-loader",
+
+                # Music player: GStreamer
+                f"{prefix}-gstreamer",
+                f"{prefix}-gst-plugins-base",
+                f"{prefix}-gst-plugins-good",
+
+                # Music player: audio analysis and scientific computing
+                f"{prefix}-python-numpy",
+                f"{prefix}-python-scipy",
+                f"{prefix}-python-scikit-learn",
+                f"{prefix}-python-numba",
+                f"{prefix}-python-librosa",
+                f"{prefix}-python-soundfile",
+                f"{prefix}-libsndfile"]
 
     subprocess.check_call(["pacman", "--noconfirm", "-S", "--needed"] + packages)
 
