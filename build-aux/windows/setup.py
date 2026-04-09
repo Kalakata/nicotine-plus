@@ -61,11 +61,7 @@ EXCLUDED_MODULES = UNAVAILABLE_MODULES + [
     "pygtkcompat", "tkinter", "turtle", "turtledemo", "unittest.test", "venv", "zoneinfo"
 ]
 INCLUDED_MODULES = [MODULE_NAME, "gi", "cairo",
-                     "numpy", "librosa", "scipy", "sklearn",
-                     "numba", "llvmlite", "joblib", "soundfile", "soxr",
-                     "lazy_loader", "decorator", "pooch", "audioread",
-                     # Python 3.13+ removed stdlib backports needed by audioread/soundfile
-                     "aifc", "audioop", "chunk", "sunau",
+                     "numpy",
                      ] + list(
     # pylint: disable=no-member
     {module for module in sys.stdlib_module_names if not module.startswith("_")}.difference(EXCLUDED_MODULES)
@@ -244,55 +240,79 @@ def add_gstreamer():
     """Bundle GStreamer core libraries and plugins for music player support."""
 
     if sys.platform == "win32":
-        return
+        lib_ext = "dll"
+        # MSYS2/MinGW GStreamer DLLs live in the bin directory
+        gst_core_libs = [
+            "libgstreamer-1.0-0.dll",
+            "libgstbase-1.0-0.dll",
+            "libgstaudio-1.0-0.dll",
+            "libgsttag-1.0-0.dll",
+            "libgstpbutils-1.0-0.dll",
+            "libgstvideo-1.0-0.dll",
+            "libgstfft-1.0-0.dll",
+            "libgstapp-1.0-0.dll",
+            "libgstriff-1.0-0.dll",
+            "libgstcontroller-1.0-0.dll",
+            "libgstnet-1.0-0.dll",
+        ]
+        gst_plugins_path = os.path.join(SYS_BASE_PATH, "lib/gstreamer-1.0")
+        platform_plugins = [
+            "libgstdirectsound.dll",       # Windows audio output
+            "libgstwasapi.dll",            # Windows WASAPI audio
+        ]
+    else:
+        lib_ext = "dylib"
+        gst_core_libs = [
+            "libgstreamer-1.0.0.dylib",
+            "libgstbase-1.0.0.dylib",
+            "libgstaudio-1.0.0.dylib",
+            "libgsttag-1.0.0.dylib",
+            "libgstpbutils-1.0.0.dylib",
+            "libgstvideo-1.0.0.dylib",
+            "libgstfft-1.0.0.dylib",
+            "libgstapp-1.0.0.dylib",
+            "libgstriff-1.0.0.dylib",
+            "libgstcontroller-1.0.0.dylib",
+            "libgstnet-1.0.0.dylib",
+        ]
+        gst_plugins_path = os.path.join(SYS_BASE_PATH, "lib/gstreamer-1.0")
+        platform_plugins = [
+            f"libgstosxaudio.{lib_ext}",   # macOS audio output
+            f"libgstapplemedia.{lib_ext}",  # Apple media support
+        ]
 
     # Core GStreamer libraries
-    gst_core_libs = [
-        "libgstreamer-1.0.0.dylib",
-        "libgstbase-1.0.0.dylib",
-        "libgstaudio-1.0.0.dylib",
-        "libgsttag-1.0.0.dylib",
-        "libgstpbutils-1.0.0.dylib",
-        "libgstvideo-1.0.0.dylib",
-        "libgstfft-1.0.0.dylib",
-        "libgstapp-1.0.0.dylib",
-        "libgstriff-1.0.0.dylib",
-        "libgstcontroller-1.0.0.dylib",
-        "libgstnet-1.0.0.dylib",
-    ]
-
     for lib in gst_core_libs:
         lib_path = os.path.join(LIB_PATH, lib)
         if os.path.exists(lib_path):
             add_file(file_path=os.path.realpath(lib_path), output_path=f"lib/{lib}")
 
-    # GStreamer plugins needed for audio playback (filesrc, decodebin, audioconvert, etc.)
-    gst_plugins_path = os.path.join(SYS_BASE_PATH, "lib/gstreamer-1.0")
+    # GStreamer plugins needed for audio playback and decoding
     required_plugins = [
-        "libgstcoreelements.dylib",    # filesrc, fakesink, queue, etc.
-        "libgstautodetect.dylib",       # autoaudiosink
-        "libgstaudioconvert.dylib",     # audioconvert
-        "libgstaudioresample.dylib",    # audioresample
-        "libgstaudioparsers.dylib",     # audio format parsers
-        "libgstplayback.dylib",         # decodebin, playbin
-        "libgsttypefindfunctions.dylib",  # type detection
-        "libgstvolume.dylib",           # volume control
-        "libgstflac.dylib",             # FLAC decoder
-        "libgstid3demux.dylib",         # ID3 tag reading
-        "libgstmpg123.dylib",           # MP3 decoder
-        "libgstogg.dylib",              # OGG container
-        "libgstvorbis.dylib",           # Vorbis decoder
-        "libgstwavparse.dylib",         # WAV parser
-        "libgstaiff.dylib",             # AIFF parser
-        "libgstopus.dylib",             # Opus decoder
-        "libgstopusparse.dylib",        # Opus parser
-        "libgstosxaudio.dylib",         # macOS audio output
-        "libgstapplemedia.dylib",       # Apple media support
-        "libgstalaw.dylib",             # A-law codec
-        "libgstmulaw.dylib",            # mu-law codec
-        "libgstadder.dylib",            # audio mixer
-        "libgstaudiofx.dylib",          # audio effects
-    ]
+        f"libgstcoreelements.{lib_ext}",       # filesrc, fakesink, queue
+        f"libgstautodetect.{lib_ext}",          # autoaudiosink
+        f"libgstaudioconvert.{lib_ext}",        # audioconvert
+        f"libgstaudioresample.{lib_ext}",       # audioresample
+        f"libgstaudioparsers.{lib_ext}",        # audio format parsers
+        f"libgstplayback.{lib_ext}",            # decodebin, playbin
+        f"libgsttypefindfunctions.{lib_ext}",   # type detection
+        f"libgstvolume.{lib_ext}",              # volume control
+        f"libgstflac.{lib_ext}",                # FLAC decoder
+        f"libgstid3demux.{lib_ext}",            # ID3 tag reading
+        f"libgstapetag.{lib_ext}",              # APE tag reading
+        f"libgstmpg123.{lib_ext}",              # MP3 decoder
+        f"libgstogg.{lib_ext}",                 # OGG container
+        f"libgstvorbis.{lib_ext}",              # Vorbis decoder
+        f"libgstwavparse.{lib_ext}",            # WAV parser
+        f"libgstaiff.{lib_ext}",                # AIFF parser
+        f"libgstopus.{lib_ext}",                # Opus decoder
+        f"libgstopusparse.{lib_ext}",           # Opus parser
+        f"libgstalaw.{lib_ext}",                # A-law codec
+        f"libgstmulaw.{lib_ext}",               # mu-law codec
+        f"libgstadder.{lib_ext}",               # audio mixer
+        f"libgstaudiofx.{lib_ext}",             # audio effects
+        f"libgstapp.{lib_ext}",                 # appsink (needed for audio decode)
+    ] + platform_plugins
 
     for plugin in required_plugins:
         plugin_path = os.path.join(gst_plugins_path, plugin)
@@ -301,26 +321,6 @@ def add_gstreamer():
                 file_path=os.path.realpath(plugin_path),
                 output_path=f"lib/gstreamer-1.0/{plugin}"
             )
-
-
-def add_librosa_stubs():
-    """Bundle .pyi stub files needed by librosa's lazy_loader."""
-
-    site_packages = os.path.join(
-        os.path.dirname(os.path.dirname(sys.executable)),
-        "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
-    )
-    librosa_path = os.path.join(site_packages, "librosa")
-
-    if not os.path.isdir(librosa_path):
-        return
-
-    for root, _dirs, files in os.walk(librosa_path):
-        for f in files:
-            if f.endswith(".pyi"):
-                full_path = os.path.join(root, f)
-                rel_path = os.path.relpath(full_path, site_packages)
-                add_file(file_path=full_path, output_path=f"lib/{rel_path}")
 
 
 def add_ssl_certs():
@@ -345,9 +345,6 @@ add_gtk()
 # GStreamer (music player)
 add_gstreamer()
 
-# Librosa stubs (needed by lazy_loader)
-add_librosa_stubs()
-
 # SSL
 add_ssl_certs()
 
@@ -370,11 +367,7 @@ setup(
             "excludes": EXCLUDED_MODULES,
             "include_files": include_files,
             "zip_include_packages": ["*"],
-            "zip_exclude_packages": [MODULE_NAME, "librosa", "lazy_loader",
-                                      "numpy", "scipy", "sklearn", "numba",
-                                      "llvmlite", "soundfile", "soxr",
-                                      "joblib", "audioread", "decorator",
-                                      "pooch"],
+            "zip_exclude_packages": [MODULE_NAME, "numpy"],
             "optimize": 2
         },
         "bdist_msi": {

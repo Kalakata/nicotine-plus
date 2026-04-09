@@ -24,8 +24,7 @@ def install_brew():
                 "mpg123",
                 "flac",
                 "libvorbis",
-                "opus",
-                "libsndfile"]
+                "opus"]
 
     subprocess.check_call(["brew", "install", "--quiet"] + packages)
 
@@ -47,26 +46,8 @@ def install_pypi():
         "setuptools",
         "wheel",
 
-        # Music player: audio analysis and scientific computing
+        # Music player: spectrogram analysis
         "numpy",
-        "librosa",
-        "scipy",
-        "scikit-learn",
-        "numba",
-        "llvmlite",
-        "joblib",
-        "soundfile",
-        "soxr",
-        "lazy_loader",
-        "decorator",
-        "pooch",
-        "audioread",
-
-        # Python 3.13+ removed stdlib modules needed by audioread/soundfile
-        "standard-aifc",
-        "audioop-lts",
-        "standard-chunk",
-        "standard-sunau",
     ])
 
 

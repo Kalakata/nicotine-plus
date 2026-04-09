@@ -7,9 +7,178 @@ permissions: {}
 
 jobs:
 
+  debian:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install python3-build
+          sudo apt build-dep .
+
+      - name: Build Debian package
+        run: |
+          python3 -m build --sdist --no-isolation
+          mk-origtargz dist/nicotine-plus-*.tar.gz
+          debuild -sa -us -uc
+
+      - name: Prepare artifacts
+        run: |
+          mkdir build/package/
+          cp -Lr ../nicotine_* build/package/
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: debian-package
+          path: build/package/
+
+  flatpak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            platform: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      options: --privileged
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Validate manifest
+        run: flatpak-builder-lint --exceptions manifest build-aux/flatpak/org.nicotine_plus.Nicotine.json
+
+      - name: Validate appstream
+        run: flatpak-builder-lint appstream data/org.nicotine_plus.Nicotine.appdata.xml.in
+
+      - name: Build Flatpak package
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: org.nicotine_plus.Nicotine-${{ matrix.arch }}.flatpak
+          manifest-path: build-aux/flatpak/org.nicotine_plus.Nicotine.json
+          cache-key: flatpak-builder-${{ github.sha }}
+          arch: ${{ matrix.arch }}
+          upload-artifact: false
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-${{ matrix.arch }}-package
+          path: org.nicotine_plus.Nicotine-${{ matrix.arch }}.flatpak
+
+  snap:
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            platform: ubuntu-latest
+          - arch: arm64
+            platform: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Build Snap package
+        uses: snapcore/action-build@v1
+        id: build-snap
+
+      - name: Install Snap package
+        run: sudo snap install --dangerous ${{ steps.build-snap.outputs.snap }}
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: snap-${{ matrix.arch }}-package
+          path: ${{ steps.build-snap.outputs.snap }}
+
+  windows:
+    timeout-minutes: 25
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            prefix: mingw-w64-clang-x86_64
+            msystem: clang64
+            platform: windows-latest
+          - arch: arm64
+            prefix: mingw-w64-clang-aarch64
+            msystem: clangarm64
+            platform: windows-11-arm
+    runs-on: ${{ matrix.platform }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            ${{ matrix.prefix }}-ca-certificates
+            ${{ matrix.prefix }}-gettext-tools
+            ${{ matrix.prefix }}-gtk4
+            ${{ matrix.prefix }}-libadwaita
+            ${{ matrix.prefix }}-python-build
+            ${{ matrix.prefix }}-python-cx-freeze
+            ${{ matrix.prefix }}-python-gobject
+            ${{ matrix.prefix }}-python-pycodestyle
+            ${{ matrix.prefix }}-python-pylint
+            ${{ matrix.prefix }}-python-setuptools
+            ${{ matrix.prefix }}-python-wheel
+            ${{ matrix.prefix }}-webp-pixbuf-loader
+            ${{ matrix.prefix }}-gstreamer
+            ${{ matrix.prefix }}-gst-plugins-base
+            ${{ matrix.prefix }}-gst-plugins-good
+            ${{ matrix.prefix }}-python-numpy
+
+      - name: Install additional dependencies
+        run: python3 build-aux/windows/dependencies.py
+
+      - name: Freeze application
+        run: python3 build-aux/windows/setup.py bdist_msi
+
+      - name: Make package portable
+        run: |
+          mkdir build-aux/windows/build/package/Nicotine+/portable/
+          cp build-aux/windows/readme-portable.txt build-aux/windows/build/package/Nicotine+/portable/README.txt
+
+      - name: Archive installer artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}-installer
+          path: build-aux/windows/build/*.msi
+
+      - name: Archive portable artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}-portable
+          path: build-aux/windows/build/package
+
   macos:
-    runs-on: macos-15
-    timeout-minutes: 45
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            platform: macos-15-intel
+          - arch: arm64
+            platform: macos-15
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 25
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -29,5 +198,5 @@ jobs:
       - name: Archive installer artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: macos-arm64-installer
+          name: macos-${{ matrix.arch }}-installer
           path: build-aux/macos/build/*.dmg

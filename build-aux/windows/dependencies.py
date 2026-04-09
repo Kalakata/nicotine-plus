@@ -30,14 +30,8 @@ def install_pacman():
                 f"{prefix}-gst-plugins-base",
                 f"{prefix}-gst-plugins-good",
 
-                # Music player: audio analysis and scientific computing
-                f"{prefix}-python-numpy",
-                f"{prefix}-python-scipy",
-                f"{prefix}-python-scikit-learn",
-                f"{prefix}-python-numba",
-                f"{prefix}-python-librosa",
-                f"{prefix}-python-soundfile",
-                f"{prefix}-libsndfile"]
+                # Music player: spectrogram analysis
+                f"{prefix}-python-numpy"]
 
     subprocess.check_call(["pacman", "--noconfirm", "-S", "--needed"] + packages)
 

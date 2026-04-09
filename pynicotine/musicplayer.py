@@ -27,14 +27,6 @@ try:
 except Exception:
     pass
 
-LIBROSA_AVAILABLE = False
-
-try:
-    import librosa
-    LIBROSA_AVAILABLE = True
-except Exception:
-    pass
-
 
 # Known frequency cutoffs for common MP3 bitrates (approximate upper bound in Hz)
 BITRATE_CUTOFFS = {
@@ -60,7 +52,7 @@ STATE_PAUSED = "paused"
 
 class MusicPlayer:
 
-    __slots__ = ("_pipeline", "_playbin", "_volume_element",
+    __slots__ = ("_pipeline", "_volume_element",
                  "_current_file", "_state", "_position_timer_id",
                  "_background_thread", "_sample_rate", "_volume",
                  "_lock", "_cancel_event")
@@ -68,7 +60,6 @@ class MusicPlayer:
     def __init__(self):
 
         self._pipeline = None
-        self._playbin = None
         self._volume_element = None
         self._current_file = None
         self._state = STATE_STOPPED
@@ -79,10 +70,7 @@ class MusicPlayer:
         self._lock = threading.Lock()
         self._cancel_event = threading.Event()
 
-        for event_name, callback in (
-            ("quit", self._quit),
-        ):
-            events.connect(event_name, callback)
+        events.connect("quit", self._quit)
 
     @property
     def state(self):
@@ -124,7 +112,6 @@ class MusicPlayer:
 
         # Source
         source = Gst.ElementFactory.make("filesrc", "source")
-        source.set_property("location", file_path)
 
         # Decoder
         decoder = Gst.ElementFactory.make("decodebin", "decoder")
@@ -135,7 +122,6 @@ class MusicPlayer:
 
         # Volume control
         volume = Gst.ElementFactory.make("volume", "volume")
-        volume.set_property("volume", self._volume)
 
         # Output
         sink = Gst.ElementFactory.make("autoaudiosink", "sink")
@@ -147,6 +133,8 @@ class MusicPlayer:
             self._pipeline = None
             return
 
+        source.set_property("location", file_path)
+        volume.set_property("volume", self._volume)
         self._volume_element = volume
 
         # Add elements to pipeline
@@ -163,11 +151,23 @@ class MusicPlayer:
 
         # Handle dynamic pad from decodebin
         decoder.connect("pad-added", self._on_decoder_pad_added, audioconvert)
+        decoder.connect("autoplug-continue", self._on_autoplug_continue)
 
         # Set up bus message handling
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_bus_message)
+
+    @staticmethod
+    def _on_autoplug_continue(_decoder, _pad, caps):
+        """Skip non-audio metadata streams (e.g. APE tags) to avoid
+        missing plugin errors."""
+
+        struct = caps.get_structure(0)
+        if struct is not None and struct.get_name() == "application/x-apetag":
+            return False
+
+        return True
 
     def _on_decoder_pad_added(self, _decoder, pad, audioconvert):
 
@@ -198,10 +198,18 @@ class MusicPlayer:
 
         if msg_type == Gst.MessageType.EOS:
             self.stop()
+            events.emit_main_thread("music-player-track-ended")
 
         elif msg_type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            log.add("Music player error: %s", f"{err.message} ({debug})")
+            debug_str = debug or ""
+
+            if "Missing" in debug_str and "plugin" in err.message.lower():
+                log.add("Music player: missing GStreamer plugin — %s. "
+                        "Install gst-plugins-good for broader format support.", debug_str)
+            else:
+                log.add("Music player error: %s", f"{err.message} ({debug_str})")
+
             self.stop()
 
     def pause(self):
@@ -269,7 +277,7 @@ class MusicPlayer:
             was_stopped = self._state == STATE_STOPPED
             self._state = STATE_STOPPED
         if not was_stopped:
-            events.emit("music-player-state-changed", self._state, self._current_file)
+            events.emit_main_thread("music-player-state-changed", self._state, self._current_file)
 
     def seek(self, position_seconds):
 
@@ -334,27 +342,100 @@ class MusicPlayer:
 
     @staticmethod
     def _decode_audio(file_path):
-        """Decode audio file to mono numpy array at native sample rate.
+        """Decode audio file to mono float32 numpy array using GStreamer.
 
-        Uses librosa.load() which handles MP3, FLAC, WAV, OGG via
-        soundfile + audioread backends.
+        Builds a decode-only pipeline: filesrc -> decodebin -> audioconvert
+        -> capsfilter (mono F32LE) -> appsink.
         Returns (samples, sample_rate) or (None, None) on failure.
         """
 
+        pipeline = Gst.Pipeline.new("decoder")
+
+        filesrc = Gst.ElementFactory.make("filesrc", None)
+        decodebin = Gst.ElementFactory.make("decodebin", None)
+        audioconvert = Gst.ElementFactory.make("audioconvert", None)
+        audioresample = Gst.ElementFactory.make("audioresample", None)
+        capsfilter = Gst.ElementFactory.make("capsfilter", None)
+        appsink = Gst.ElementFactory.make("appsink", None)
+
+        if any(e is None for e in (filesrc, decodebin, audioconvert,
+                                   audioresample, capsfilter, appsink)):
+            log.add("Music player: failed to create GStreamer decode elements")
+            return None, None
+
+        filesrc.set_property("location", file_path)
+        capsfilter.set_property("caps", Gst.Caps.from_string(
+            "audio/x-raw,format=F32LE,channels=1"
+        ))
+        appsink.set_property("sync", False)
+
+        for elem in (filesrc, decodebin, audioconvert,
+                     audioresample, capsfilter, appsink):
+            pipeline.add(elem)
+
+        filesrc.link(decodebin)
+        audioconvert.link(audioresample)
+        audioresample.link(capsfilter)
+        capsfilter.link(appsink)
+
+        def _on_pad_added(_decodebin, pad):
+            caps = pad.get_current_caps() or pad.query_caps(None)
+            struct = caps.get_structure(0) if caps else None
+            if struct and struct.get_name().startswith("audio/"):
+                sink_pad = audioconvert.get_static_pad("sink")
+                if not sink_pad.is_linked():
+                    pad.link(sink_pad)
+
+        decodebin.connect("pad-added", _on_pad_added)
+        decodebin.connect("autoplug-continue", MusicPlayer._on_autoplug_continue)
+
+        pipeline.set_state(Gst.State.PLAYING)
+
+        buffers = []
+        sample_rate = 44100
+        rate_detected = False
+
         try:
-            samples, sample_rate = librosa.load(file_path, sr=None, mono=True)
-            return samples, sample_rate
+            while True:
+                sample = appsink.emit("pull-sample")
+                if sample is None:
+                    break
+
+                if not rate_detected:
+                    sample_caps = sample.get_caps()
+                    if sample_caps and sample_caps.get_size() > 0:
+                        struct = sample_caps.get_structure(0)
+                        success, rate = struct.get_int("rate")
+                        if success:
+                            sample_rate = rate
+                            rate_detected = True
+
+                buf = sample.get_buffer()
+                success, map_info = buf.map(Gst.MapFlags.READ)
+                if success:
+                    buffers.append(
+                        np.frombuffer(bytes(map_info.data), dtype=np.float32).copy()
+                    )
+                    buf.unmap(map_info)
         except Exception as e:
             log.add("Music player: failed to decode audio: %s", str(e))
+            pipeline.set_state(Gst.State.NULL)
             return None, None
+
+        pipeline.set_state(Gst.State.NULL)
+
+        if not buffers:
+            return None, None
+
+        return np.concatenate(buffers), sample_rate
 
     # Spectrogram Analysis #
 
     def analyze_and_generate_waveform(self, file_path, num_bars=150):
         """Run waveform generation then spectral analysis in a background thread."""
 
-        if not LIBROSA_AVAILABLE:
-            log.add("librosa not available, cannot analyze audio")
+        if not GSTREAMER_AVAILABLE or not NUMPY_AVAILABLE:
+            log.add("GStreamer/numpy not available, cannot analyze audio")
             return
 
         if not os.path.isfile(file_path):
@@ -433,17 +514,51 @@ class MusicPlayer:
 
         events.emit_main_thread("music-player-waveform-ready", file_path, waveform)
 
+    @staticmethod
+    def _stft(samples, n_fft=4096, hop_length=1024):
+        """Compute Short-Time Fourier Transform using numpy.
+
+        Returns complex matrix of shape (n_fft//2 + 1, num_frames).
+        """
+
+        window = np.hanning(n_fft)
+        num_frames = 1 + (len(samples) - n_fft) // hop_length
+        stft_matrix = np.empty((n_fft // 2 + 1, num_frames), dtype=np.complex64)
+
+        for i in range(num_frames):
+            start = i * hop_length
+            stft_matrix[:, i] = np.fft.rfft(samples[start:start + n_fft] * window)
+
+        return stft_matrix
+
+    @staticmethod
+    def _amplitude_to_db(magnitude, top_db=80.0):
+        """Convert amplitude spectrogram to dB scale (mirrors librosa behaviour)."""
+
+        amin = 1e-5
+        ref_value = np.max(magnitude)
+        if ref_value < amin:
+            ref_value = amin
+
+        log_spec = 20.0 * np.log10(np.maximum(magnitude, amin))
+        log_spec -= 20.0 * np.log10(max(ref_value, amin))
+
+        if top_db is not None:
+            log_spec = np.maximum(log_spec, log_spec.max() - top_db)
+
+        return log_spec
+
     def _generate_spectrogram(self, samples, sample_rate, file_path):
-        """Generate spectrogram using librosa STFT and run transcode detection."""
+        """Generate spectrogram using numpy STFT and run transcode detection."""
 
         # Compute STFT — n_fft=4096 gives ~10Hz resolution at 44.1kHz
-        stft = librosa.stft(samples, n_fft=4096, hop_length=1024)
+        stft = self._stft(samples, n_fft=4096, hop_length=1024)
         magnitude = np.abs(stft)
 
         # Convert to dB
-        spectrogram_db = librosa.amplitude_to_db(magnitude, ref=np.max)
+        spectrogram_db = self._amplitude_to_db(magnitude)
 
-        # librosa STFT shape is (n_fft/2+1, num_frames)
+        # STFT shape is (n_fft/2+1, num_frames)
         # GUI expects (num_frames, num_bands) — transpose
         spectrogram = spectrogram_db.T.astype(np.float32)
 
@@ -480,7 +595,7 @@ class MusicPlayer:
         kernel = np.ones(smooth_size) / smooth_size
         smoothed = np.convolve(avg_spectrum, kernel, mode="same")
 
-        # The dB floor from librosa.amplitude_to_db is -80dB
+        # The dB floor from _amplitude_to_db is -80dB (top_db=80)
         # A lossy codec creates a hard cutoff where the spectrum drops to this floor
         # Walk from high frequencies down, find where spectrum rises above the floor
         db_floor = -79.0  # just above the -80dB floor
@@ -518,16 +633,8 @@ class MusicPlayer:
 
         if cutoff_hz < expected_cutoff:
             # Find closest matching source bitrate
-            best_match = None
-            best_diff = float("inf")
-            for bitrate, cutoff in BITRATE_CUTOFFS.items():
-                diff = abs(cutoff_hz - cutoff)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_match = bitrate
-
+            estimated_source = min(BITRATE_CUTOFFS, key=lambda br: abs(cutoff_hz - BITRATE_CUTOFFS[br]))
             verdict = "likely_transcode"
-            estimated_source = best_match
 
         return {
             "cutoff_hz": round(cutoff_hz),
