@@ -6,6 +6,7 @@ import threading
 
 from pynicotine.config import config
 from pynicotine.events import events
+from pynicotine.external.tinytag import TinyTag
 from pynicotine.logfacility import log
 
 GSTREAMER_AVAILABLE = False
@@ -296,20 +297,22 @@ class MusicPlayer:
 
         self._volume = max(0.0, min(1.0, volume))
 
-        if self._volume_element is not None:
-            self._volume_element.set_property("volume", self._volume)
+        volume_elem = self._volume_element
+        if volume_elem is not None:
+            volume_elem.set_property("volume", self._volume)
 
     def get_position(self):
         """Returns (current_seconds, duration_seconds) or (0, 0) if unavailable."""
 
-        if self._pipeline is None:
+        pipeline = self._pipeline
+        if pipeline is None:
             return 0, 0
 
-        success, position = self._pipeline.query_position(Gst.Format.TIME)
+        success, position = pipeline.query_position(Gst.Format.TIME)
         if not success:
             position = 0
 
-        success, duration = self._pipeline.query_duration(Gst.Format.TIME)
+        success, duration = pipeline.query_duration(Gst.Format.TIME)
         if not success:
             duration = 0
 
@@ -341,7 +344,7 @@ class MusicPlayer:
     # Audio Decoding #
 
     @staticmethod
-    def _decode_audio(file_path):
+    def _decode_audio(file_path, cancel=None):
         """Decode audio file to mono float32 numpy array using GStreamer.
 
         Builds a decode-only pipeline: filesrc -> decodebin -> audioconvert
@@ -389,16 +392,34 @@ class MusicPlayer:
         decodebin.connect("pad-added", _on_pad_added)
         decodebin.connect("autoplug-continue", MusicPlayer._on_autoplug_continue)
 
-        pipeline.set_state(Gst.State.PLAYING)
+        ret = pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            log.add("Music player: decode pipeline failed to start for %s", file_path)
+            pipeline.set_state(Gst.State.NULL)
+            return None, None
 
+        bus = pipeline.get_bus()
         buffers = []
         sample_rate = 44100
         rate_detected = False
+        timeout_ns = 2 * Gst.SECOND
 
         try:
             while True:
-                sample = appsink.emit("pull-sample")
+                if cancel is not None and cancel.is_set():
+                    break
+
+                sample = appsink.emit("try-pull-sample", timeout_ns)
                 if sample is None:
+                    # Check bus for EOS or error
+                    msg = bus.pop_filtered(
+                        Gst.MessageType.EOS | Gst.MessageType.ERROR
+                    )
+                    if msg is not None and msg.type == Gst.MessageType.ERROR:
+                        err, debug = msg.parse_error()
+                        log.add("Music player: decode error: %s", err.message)
+                        break
+                    # EOS or timeout with no more data
                     break
 
                 if not rate_detected:
@@ -466,7 +487,7 @@ class MusicPlayer:
     def _run_background_tasks(self, file_path, num_bars, cancel):
         """Decode audio once, then generate waveform and spectrogram from numpy arrays."""
 
-        samples, sample_rate = self._decode_audio(file_path)
+        samples, sample_rate = self._decode_audio(file_path, cancel=cancel)
         if samples is None:
             log.add("Music player: failed to decode audio for analysis")
             return
@@ -519,17 +540,26 @@ class MusicPlayer:
         """Compute Short-Time Fourier Transform using numpy.
 
         Returns complex matrix of shape (n_fft//2 + 1, num_frames).
+        Uses stride tricks to vectorize the windowing for performance.
         """
 
-        window = np.hanning(n_fft)
         num_frames = 1 + (len(samples) - n_fft) // hop_length
-        stft_matrix = np.empty((n_fft // 2 + 1, num_frames), dtype=np.complex64)
+        if num_frames <= 0:
+            return np.empty((n_fft // 2 + 1, 0), dtype=np.complex64)
 
-        for i in range(num_frames):
-            start = i * hop_length
-            stft_matrix[:, i] = np.fft.rfft(samples[start:start + n_fft] * window)
+        samples = np.ascontiguousarray(samples)
+        window = np.hanning(n_fft).astype(samples.dtype)
 
-        return stft_matrix
+        # Build windowed frames using stride tricks (avoids Python loop)
+        from numpy.lib.stride_tricks import as_strided
+        frame_stride = hop_length * samples.strides[0]
+        frames = as_strided(
+            samples,
+            shape=(num_frames, n_fft),
+            strides=(frame_stride, samples.strides[0])
+        )
+
+        return np.fft.rfft(frames * window, axis=1).T.astype(np.complex64)
 
     @staticmethod
     def _amplitude_to_db(magnitude, top_db=80.0):
@@ -553,6 +583,9 @@ class MusicPlayer:
 
         # Compute STFT — n_fft=4096 gives ~10Hz resolution at 44.1kHz
         stft = self._stft(samples, n_fft=4096, hop_length=1024)
+        if stft.shape[1] == 0:
+            return
+
         magnitude = np.abs(stft)
 
         # Convert to dB
@@ -615,7 +648,6 @@ class MusicPlayer:
         estimated_source = None
 
         # Get reported bitrate from TinyTag
-        from pynicotine.external.tinytag import TinyTag
         try:
             tag = TinyTag.get(file_path)
             reported_bitrate = int(tag.bitrate) if tag.bitrate else None

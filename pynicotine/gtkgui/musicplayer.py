@@ -13,6 +13,7 @@ from gi.repository import Gtk
 from pynicotine.config import config
 from pynicotine.core import core
 from pynicotine.events import events
+from pynicotine.external.tinytag import TinyTag
 from pynicotine.gtkgui.application import GTK_API_VERSION
 from pynicotine.gtkgui.widgets import ui
 from pynicotine.gtkgui.widgets.dialogs import EntryDialog
@@ -27,6 +28,11 @@ from pynicotine.shares import FileTypes
 
 
 AUDIO_EXTENSIONS = {"." + ext for ext in FileTypes.AUDIO}
+
+# Spectrogram display range (dB)
+SPECTROGRAM_DB_UPPER = 0.0
+SPECTROGRAM_DB_LOWER = -120.0
+SPECTROGRAM_DB_RANGE = SPECTROGRAM_DB_UPPER - SPECTROGRAM_DB_LOWER
 
 
 class MusicPlayerPanel:
@@ -79,11 +85,13 @@ class MusicPlayerPanel:
         self._new_files = set()          # files added during refreshes (starred)
         self._listened_files = set()     # new files that have been played (hollow star)
         self._is_refresh = False         # True when _load_folder is called from refresh
+        self._select_after_refresh = None  # filename to select after folder refresh
         self._show_cutoff_overlay = True # toggle for red cutoff zone on spectrogram
         self._quality_score = -1         # 0-100 quality percentage, -1 = not analyzed
         self._freq_zoom = 1.0            # frequency axis zoom level (1.0 = full range)
         self._freq_center = 0.5          # center of visible frequency range (0=low, 1=high)
         self._drag_start_center = 0.5    # saved center at drag start
+        self._drag_last_y = None         # GTK 3: previous Y for drag delta
 
         # Append our container into the mainwindow's music_player_container
         if GTK_API_VERSION >= 4:
@@ -219,6 +227,7 @@ class MusicPlayerPanel:
             ("music-player-position-updated", self._on_position_updated),
             ("music-player-analysis-complete", self._on_analysis_complete),
             ("music-player-waveform-ready", self._on_waveform_ready),
+            ("music-player-track-ended", self._on_track_ended),
         ):
             events.connect(event_name, callback)
 
@@ -281,7 +290,6 @@ class MusicPlayerPanel:
             duration_str = ""
 
             try:
-                from pynicotine.external.tinytag import TinyTag
                 tag = TinyTag.get(full_path)
 
                 if tag.bitrate:
@@ -374,6 +382,16 @@ class MusicPlayerPanel:
         ):
             return
 
+        # Only refresh for audio files (or directories)
+        if _file:
+            name = _file.get_basename()
+            if name:
+                _, ext = os.path.splitext(name)
+                if ext.lower() not in AUDIO_EXTENSIONS:
+                    path = _file.get_path()
+                    if path and not os.path.isdir(path):
+                        return
+
         # Debounce: wait 1 second after the last change before refreshing
         if self._refresh_timer_id is not None:
             GLib.source_remove(self._refresh_timer_id)
@@ -397,22 +415,53 @@ class MusicPlayerPanel:
             if playing_path and playing_path in self._file_list:
                 self._current_index = self._file_list.index(playing_path)
 
+            # Select the file queued by delete, then clear the request
+            select_name = self._select_after_refresh
+            if select_name and select_name in self.file_list_view.iterators:
+                row_iter = self.file_list_view.iterators[select_name]
+                self.file_list_view.select_row(row_iter)
+            self._select_after_refresh = None
+
         return GLib.SOURCE_REMOVE
 
     def _on_key_pressed(self, _controller, keyval, _keycode, _state):
-        """GTK 4: intercept space to toggle play/pause."""
+        """GTK 4: intercept key events for playback control."""
 
         if keyval == Gdk.KEY_space:
             self.on_play_pause()
             return Gdk.EVENT_STOP
 
+        if keyval == Gdk.KEY_BackSpace:
+            self.on_delete_file()
+            return Gdk.EVENT_STOP
+
+        if keyval == Gdk.KEY_Left:
+            self._skip_seconds(-15)
+            return Gdk.EVENT_STOP
+
+        if keyval == Gdk.KEY_Right:
+            self._skip_seconds(15)
+            return Gdk.EVENT_STOP
+
         return Gdk.EVENT_PROPAGATE
 
     def _on_key_pressed_gtk3(self, _widget, event):
-        """GTK 3: intercept space to toggle play/pause."""
+        """GTK 3: intercept key events for playback control."""
 
         if event.keyval == Gdk.KEY_space:
             self.on_play_pause()
+            return True
+
+        if event.keyval == Gdk.KEY_BackSpace:
+            self.on_delete_file()
+            return True
+
+        if event.keyval == Gdk.KEY_Left:
+            self._skip_seconds(-15)
+            return True
+
+        if event.keyval == Gdk.KEY_Right:
+            self._skip_seconds(15)
             return True
 
         return False
@@ -435,14 +484,12 @@ class MusicPlayerPanel:
     def on_file_activated(self, _list_view, _iterator, _column_id):
         """Double click/Enter: play audio files or navigate into folders."""
 
-        iterator = self.file_list_view.get_selected_rows()
-        if not iterator:
+        iterators = list(self.file_list_view.get_selected_rows())
+        if not iterators:
             return
 
-        for row_iter in iterator:
-            file_path = self.file_list_view.get_row_value(row_iter, "path_data")
-            break
-
+        row_iter = iterators[0]
+        file_path = self.file_list_view.get_row_value(row_iter, "path_data")
         if not file_path:
             return
 
@@ -470,7 +517,7 @@ class MusicPlayerPanel:
 
         if core.musicplayer.state == "stopped":
             # Play first/selected file
-            if self._current_index >= 0 and self._current_index < len(self._file_list):
+            if 0 <= self._current_index < len(self._file_list):
                 core.musicplayer.play(self._file_list[self._current_index])
             elif self._file_list:
                 self._current_index = 0
@@ -518,16 +565,20 @@ class MusicPlayerPanel:
 
         return False
 
+    def _stop_if_playing(self, file_path):
+        """Stop playback if the given file is currently playing."""
+
+        if file_path == self._current_playing_file:
+            if core.musicplayer is not None:
+                core.musicplayer.stop()
+            self._current_playing_file = None
+
     # Context Menu #
 
     def _get_selected_file_path(self):
         """Get the file path of the currently selected row."""
 
-        iterators = self.file_list_view.get_selected_rows()
-        if not iterators:
-            return None
-
-        for row_iter in iterators:
+        for row_iter in self.file_list_view.get_selected_rows():
             return self.file_list_view.get_row_value(row_iter, "path_data")
 
         return None
@@ -590,11 +641,7 @@ class MusicPlayerPanel:
             log.add("Music player: failed to rename file: %s", error)
             return
 
-        # Stop playback if renaming the currently playing file
-        if file_path == self._current_playing_file:
-            if core.musicplayer is not None:
-                core.musicplayer.stop()
-            self._current_playing_file = None
+        self._stop_if_playing(file_path)
 
     def on_delete_file(self, *_args):
 
@@ -613,15 +660,23 @@ class MusicPlayerPanel:
             callback_data=file_path
         ).present()
 
-    def _on_delete_response(self, _dialog, _response_id, file_path):
+    def _on_delete_response(self, _dialog, response_id, file_path):
+
+        if response_id != "ok":
+            return
+
+        # Determine next file to select after refresh
+        try:
+            idx = self._file_list.index(file_path)
+            if idx + 1 < len(self._file_list):
+                self._select_after_refresh = os.path.basename(self._file_list[idx + 1])
+            elif idx - 1 >= 0:
+                self._select_after_refresh = os.path.basename(self._file_list[idx - 1])
+        except ValueError:
+            pass
 
         try:
-            # Stop playback if deleting the currently playing file
-            if file_path == self._current_playing_file:
-                if core.musicplayer is not None:
-                    core.musicplayer.stop()
-                self._current_playing_file = None
-
+            self._stop_if_playing(file_path)
             os.remove(file_path)
         except OSError as error:
             log.add("Music player: failed to delete file: %s", error)
@@ -648,23 +703,32 @@ class MusicPlayerPanel:
                 self._quality_score = -1
                 self.quality_bar.queue_draw()
                 self._spectrogram = None
-                self._spectrogram_surface = None
                 self._analysis_result = None
+                self._invalidate_spectrogram_surface()
                 self._freq_zoom = 1.0
                 self._freq_center = 0.5
                 self.spectrogram_area.queue_draw()
 
                 core.musicplayer.analyze_and_generate_waveform(file_path)
 
-        elif state == "paused":
+        else:
             self.play_button.set_icon_name("media-playback-start-symbolic")
-        elif state == "stopped":
-            self.play_button.set_icon_name("media-playback-start-symbolic")
-            self.position_label.set_text("0:00")
-            self.duration_label.set_text("0:00")
-            self._playback_progress = 0.0
-            self._current_playing_file = None
-            self.waveform_area.queue_draw()
+
+            if state == "stopped":
+                self.position_label.set_text("0:00")
+                self.duration_label.set_text("0:00")
+                self._playback_progress = 0.0
+                self._current_playing_file = None
+                self.waveform_area.queue_draw()
+
+    def _on_track_ended(self):
+        """Auto-advance to the next track when the current one finishes."""
+
+        if not self._file_list or self._current_index < 0:
+            return
+
+        if self._current_index < len(self._file_list) - 1:
+            self.on_next()
 
     def _update_track_info(self, file_path):
 
@@ -676,9 +740,7 @@ class MusicPlayerPanel:
         artist = ""
 
         try:
-            from pynicotine.external.tinytag import TinyTag
             tag = TinyTag.get(file_path)
-
             if tag.title:
                 title = tag.title
             if tag.artist:
@@ -771,8 +833,7 @@ class MusicPlayerPanel:
         for i, amplitude in enumerate(self._waveform_data):
             x = i * (bar_width + bar_gap)
 
-            scaled = amplitude
-            bar_height = max(2, scaled * max_bar_height)
+            bar_height = max(2, amplitude * max_bar_height)
 
             # Played = bright blue, unplayed = dim blue
             if x + bar_width <= progress_x:
@@ -792,6 +853,16 @@ class MusicPlayerPanel:
 
             cr.rectangle(x, center_y - bar_height / 2, bar_width, bar_height)
             cr.fill()
+
+    def _skip_seconds(self, seconds):
+        """Skip forward or backward by the given number of seconds."""
+
+        if core.musicplayer is None or self._playback_duration <= 0:
+            return
+
+        current = self._playback_progress * self._playback_duration
+        target = max(0.0, min(self._playback_duration, current + seconds))
+        core.musicplayer.seek(target)
 
     def _seek_from_waveform_x(self, x, width):
         """Seek to position based on x coordinate within waveform area."""
@@ -910,11 +981,15 @@ class MusicPlayerPanel:
         self._invalidate_spectrogram_surface()
         self.spectrogram_area.queue_draw()
 
-    def _on_spectrogram_scroll(self, _controller, _dx, dy):
+    def _on_spectrogram_scroll(self, controller, _dx, dy):
         """GTK 4: scroll to zoom frequency axis."""
 
         height = self.spectrogram_area.get_height()
-        self._apply_zoom(-dy, height=height)
+        mouse_y = None
+        event = controller.get_current_event()
+        if event is not None:
+            _ok, _x, mouse_y = event.get_position()
+        self._apply_zoom(-dy, mouse_y=mouse_y, height=height)
         return Gdk.EVENT_STOP
 
     def _on_spectrogram_scroll_gtk3(self, widget, event):
@@ -956,7 +1031,9 @@ class MusicPlayerPanel:
             self.spectrogram_area.queue_draw()
 
     def _on_spectrogram_click_gtk3(self, widget, event):
-        """GTK 3: double-click to reset zoom."""
+        """GTK 3: click to start drag tracking, double-click to reset zoom."""
+
+        self._drag_last_y = None
 
         if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
             self._freq_zoom = 1.0
@@ -969,15 +1046,22 @@ class MusicPlayerPanel:
         """GTK 3: drag to pan frequency axis."""
 
         if not (event.state & Gdk.ModifierType.BUTTON1_MASK):
+            self._drag_last_y = None
             return True
 
         height = widget.get_allocation().height
         if height <= 0 or self._freq_zoom <= 1.0:
             return True
 
-        # Simple pan based on motion delta
-        pan_ratio = 2.0 / height / self._freq_zoom
-        self._freq_center = max(0.0, min(1.0, self._freq_center + pan_ratio))
+        if self._drag_last_y is None:
+            self._drag_last_y = event.y
+            return True
+
+        delta_y = event.y - self._drag_last_y
+        self._drag_last_y = event.y
+
+        pan_ratio = delta_y / height / self._freq_zoom
+        self._freq_center += pan_ratio
 
         visible_half = 0.5 / self._freq_zoom
         self._freq_center = max(visible_half, min(1.0 - visible_half, self._freq_center))
@@ -1025,10 +1109,6 @@ class MusicPlayerPanel:
         num_frames = spectrogram.shape[0]
         num_bands = spectrogram.shape[1]
 
-        urange = 0.0
-        lrange = -120.0
-        db_range = urange - lrange
-
         visible_half = 0.5 / self._freq_zoom
         view_lo = self._freq_center - visible_half
         view_hi = self._freq_center + visible_half
@@ -1036,41 +1116,54 @@ class MusicPlayerPanel:
         pw = int(plot_width)
         ph = int(plot_height)
 
-        # Build pixel buffer using numpy for speed
+        # Build pixel buffer using vectorized numpy
         num_cols = min(num_frames, pw)
         pixels = np.zeros((ph, pw, 4), dtype=np.uint8)
 
-        # Pre-compute color LUT (256 entries)
+        # Pre-compute color LUT (256 entries, BGRA order)
         lut = np.zeros((256, 3), dtype=np.uint8)
         for i in range(256):
             level = i / 255.0
             r, g, b = self._spectrogram_color(level)
-            lut[i] = (int(b * 255), int(g * 255), int(r * 255))  # BGRA order
+            lut[i] = (int(b * 255), int(g * 255), int(r * 255))
+
+        # Vectorized: compute all band indices for each row
+        row_indices = np.arange(ph)
+        visible_ratios = 1.0 - (row_indices / ph)
+        full_ratios = view_lo + visible_ratios * (view_hi - view_lo)
+
+        # Mask rows outside valid range
+        valid_mask = (full_ratios >= 0.0) & (full_ratios <= 1.0)
+        bands = np.clip((full_ratios * num_bands).astype(int), 0, num_bands - 1)
+
+        # Fully vectorized spectrogram rendering (no Python column loop)
+        col_indices = np.arange(num_cols)
+        frame_indices = np.clip((col_indices * num_frames / num_cols).astype(int), 0, num_frames - 1)
+
+        # Gather all dB values at once: shape (num_cols, ph)
+        all_values = spectrogram[frame_indices][:, bands]  # (num_cols, ph)
+        all_values = np.clip(all_values, SPECTROGRAM_DB_LOWER, SPECTROGRAM_DB_UPPER)
+        level_indices = np.clip(
+            ((all_values - SPECTROGRAM_DB_LOWER) / SPECTROGRAM_DB_RANGE * 255).astype(int),
+            0, 255
+        )
+
+        # Map to colors: shape (num_cols, ph, 3)
+        all_colors = lut[level_indices]  # (num_cols, ph, 3)
+
+        # Expand columns to pixel width using repeat
+        x_starts = (col_indices * pw / num_cols).astype(int)
+        x_ends = ((col_indices + 1) * pw / num_cols).astype(int)
+        col_widths = x_ends - x_starts
 
         for col in range(num_cols):
-            frame_idx = int(col * num_frames / num_cols)
-            if frame_idx >= num_frames:
-                break
-            x_start = int(col * pw / num_cols)
-            x_end = int((col + 1) * pw / num_cols)
-
-            for py in range(ph):
-                visible_ratio = 1.0 - (py / ph)
-                full_ratio = view_lo + visible_ratio * (view_hi - view_lo)
-
-                if full_ratio < 0.0 or full_ratio > 1.0:
-                    continue
-
-                band = min(int(full_ratio * num_bands), num_bands - 1)
-                value = max(lrange, min(urange, spectrogram[frame_idx, band]))
-                level_idx = int((value - lrange) / db_range * 255)
-                level_idx = max(0, min(255, level_idx))
-
-                b, g, r = lut[level_idx]
-                pixels[py, x_start:x_end, 0] = b
-                pixels[py, x_start:x_end, 1] = g
-                pixels[py, x_start:x_end, 2] = r
-                pixels[py, x_start:x_end, 3] = 255
+            w = col_widths[col]
+            if w <= 0:
+                continue
+            pixels[valid_mask, x_starts[col]:x_ends[col], 0] = all_colors[col, valid_mask, 0:1]
+            pixels[valid_mask, x_starts[col]:x_ends[col], 1] = all_colors[col, valid_mask, 1:2]
+            pixels[valid_mask, x_starts[col]:x_ends[col], 2] = all_colors[col, valid_mask, 2:3]
+            pixels[valid_mask, x_starts[col]:x_ends[col], 3] = 255
 
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, pw, ph)
         buf = surface.get_data()
@@ -1094,19 +1187,9 @@ class MusicPlayerPanel:
         if self._spectrogram is None or not NUMPY_AVAILABLE:
             return
 
-        import numpy as np
-
         spectrogram = self._spectrogram
-        num_frames = spectrogram.shape[0]
-        num_bands = spectrogram.shape[1]
-
-        if num_frames == 0 or num_bands == 0:
+        if 0 in spectrogram.shape:
             return
-
-        # Spek uses -120 to 0 dB range for full dynamic range visibility
-        urange = 0.0
-        lrange = -120.0
-        db_range = urange - lrange
 
         label_width = 35
         plot_width = width - label_width
@@ -1115,15 +1198,16 @@ class MusicPlayerPanel:
         if plot_width <= 0 or plot_height <= 0:
             return
 
-        sample_rate = 44100
-        if self._analysis_result:
-            sample_rate = self._analysis_result.get("sample_rate", 44100)
+        sample_rate = self._analysis_result.get("sample_rate", 44100) if self._analysis_result else 44100
         nyquist = sample_rate / 2.0
-        freq_per_band = nyquist / num_bands
 
-        # Build or reuse cached surface
-        if self._spectrogram_surface is None:
+        # Build or reuse cached surface; invalidate on size change
+        pw, ph = int(plot_width), int(plot_height)
+        if (self._spectrogram_surface is None
+                or getattr(self, "_spectrogram_surface_size", None) != (pw, ph)):
+            self._spectrogram_surface = None
             self._build_spectrogram_surface(plot_width, plot_height)
+            self._spectrogram_surface_size = (pw, ph)
 
         if self._spectrogram_surface is not None:
             cr.set_source_surface(self._spectrogram_surface, 0, 0)
@@ -1170,9 +1254,8 @@ class MusicPlayerPanel:
                 # Label
                 cr.set_font_size(9)
                 cr.set_source_rgba(1.0, 0.3, 0.3, 1.0)
-                label = f"{cutoff_hz} Hz"
                 cr.move_to(3, cutoff_y - 4)
-                cr.show_text(label)
+                cr.show_text(f"{cutoff_hz} Hz")
 
         # Frequency axis labels (dynamic based on sample rate and zoom)
         cr.set_source_rgb(0.7, 0.7, 0.7)
@@ -1270,6 +1353,7 @@ class MusicPlayerPanel:
             ("music-player-position-updated", self._on_position_updated),
             ("music-player-analysis-complete", self._on_analysis_complete),
             ("music-player-waveform-ready", self._on_waveform_ready),
+            ("music-player-track-ended", self._on_track_ended),
         ):
             events.disconnect(event_name, callback)
 

@@ -1334,6 +1334,7 @@ class MainWindow(Window):
         self.log_view.destroy()
         self.popup_menu_log_view.destroy()
         self.popup_menu_log_categories.destroy()
+        self.music_player.destroy()
 
         self.widget.disconnect(self.window_active_handler)
         self.widget.disconnect(self.window_visible_handler)
