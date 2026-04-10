@@ -417,7 +417,8 @@ class Config:
                 "npothercommand": "",
                 "npplayer": "mpris",
                 "npformatlist": [],
-                "npformat": ""
+                "npformat": "",
+                "volume": 100
             },
             "notifications": {
                 "notification_window_title": True,

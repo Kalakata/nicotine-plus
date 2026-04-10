@@ -9,7 +9,6 @@
     <property name="hexpand">False</property>
     <property name="orientation">vertical</property>
     <property name="visible">True</property>
-    <property name="overflow">hidden</property>
 
     <!-- Header -->
     <child>
